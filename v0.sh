@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# v0.sh - Linux 全维安全审计脚本 (只读检测版)
-# 特性：5级风险定级 + 深度问题描述 + 绝美UI + 纯净代码无干扰
+# v0.sh - Linux 全维安全审计脚本 (v1.1 闪屏修复版)
+# 修复：报告打印后增加 read -r 暂停，防止屏幕闪退。
 
 set -u
 export LC_ALL=C
@@ -195,6 +195,10 @@ print_report() {
     echo -e "审计评分: ${S_COLOR}${BOLD}$SCORE 分${RESET}  ($MSG)"
     echo -e "提示: 本脚本仅做检测，如需修复请使用 ${CYAN}v1.sh${RESET} (基础加固) 和 ${CYAN}v2.sh${RESET} (密钥配置)。"
     ui_header
+    
+    # === 核心修复：增加暂停命令 ===
+    echo -ne "${YELLOW}按任意键返回主菜单...${RESET}"
+    read -r 
 }
 
 # --- 执行 ---
