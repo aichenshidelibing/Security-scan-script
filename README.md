@@ -6,3 +6,11 @@ wget -qO install.sh <https://raw.githubusercontent.com/aichenshidelibing/Securit
 
 Execute
 chmod +x install.sh && ./install.sh
+
+安全扫描脚本
+
+下载安装脚本
+wget -qO install.sh https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+
+执行安装
+chmod +x install.sh && ./install.sh
