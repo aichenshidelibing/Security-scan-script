@@ -8,7 +8,7 @@ export LC_ALL=C
 # --- 配置 ---
 # 【重要】请将这里的 GITHUB_BASE 替换为你存放 v0-v3 脚本的实际仓库地址
 # 示例：假设你将所有脚本放在 https://raw.githubusercontent.com/YourUser/YourRepo/main/
-GITHUB_BASE="https://raw.githubusercontent.com/PLACEHOLDER/SEC_SCRIPTS/main" 
+GITHUB_BASE="https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main" 
 
 # --- 颜色定义 ---
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m'); 
