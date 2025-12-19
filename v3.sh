@@ -1,28 +1,45 @@
 #!/usr/bin/env bash
-# v3.sh - 服务器禁Ping管理工具 (v5.0 佛系手动版)
-# 特性：默认全关 + 先看状态后操作 + 完美对齐UI
+# <SEC_SCRIPT_MARKER_v2.3>
+# v3.sh - 服务器禁Ping管理工具 (v5.2 智慧感知完整版)
+# 特性：内核+防火墙双重屏蔽 | 默认手动翻转 | 自适应UI | 逻辑返回主菜单
 
 set -u
 export LC_ALL=C
 
-# --- 变量与配置 ---
-REPORT="/root/security_audit_report.txt"
+# ---------- 统一自适应 UI 区 ----------
+# 优先读取主控台变量，读不到则本地检测
+if [ "${USE_EMOJI:-}" == "" ]; then
+    if [[ "${LANG:-}" =~ "UTF-8" ]] || [[ "${LANG:-}" =~ "utf8" ]]; then
+        USE_EMOJI="1"
+    else
+        USE_EMOJI="0"
+    fi
+fi
 
 # 颜色定义
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m'); 
 GREY=$(printf '\033[90m'); CYAN=$(printf '\033[36m'); WHITE=$(printf '\033[37m'); RESET=$(printf '\033[0m')
 BOLD=$(printf '\033[1m')
 
-# 数据存储
+# 根据环境定义图标
+if [ "$USE_EMOJI" == "1" ]; then
+    I_OK="✅"; I_WARN="⚠️ "; I_INFO="ℹ️ "; I_LOCK="🚫"; I_UNLOCK="🟢"
+else
+    I_OK="[  OK  ]"; I_WARN="[ WARN ]"; I_FAIL="[ FAIL ]"; I_INFO="[ INFO ]"; I_LOCK="[禁]"; I_UNLOCK="[放]"
+fi
+# ------------------------------------
+
+# --- 变量与数据 ---
+REPORT="/root/security_audit_report.txt"
 declare -a IDS TITLES PROS RISKS STATUS SELECTED
 COUNT=0
 MSG=""
 FW_TYPE="none"
 
 # --- 辅助工具 ---
-ui_info() { echo -e "${CYAN}ℹ️  $*${RESET}"; }
-ui_ok()   { echo -e "${GREEN}✅ $*${RESET}"; }
-ui_warn() { echo -e "${YELLOW}⚠️  $*${RESET}"; }
+ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
+ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
+ui_warn() { echo -e "${YELLOW}${I_WARN} $*${RESET}"; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
 # --- 1. 防火墙自动检测 ---
@@ -34,7 +51,7 @@ detect_firewall() {
     FW_TYPE="none"
 }
 
-# --- 2. 注册显示函数 ---
+# --- 2. 注册项目与审计 ---
 add_item() {
     COUNT=$((COUNT+1))
     IDS[$COUNT]=$COUNT
@@ -42,120 +59,66 @@ add_item() {
     PROS[$COUNT]="$2"
     RISKS[$COUNT]="$3"
     
-    # 检测状态
-    if eval "$4"; then
-        STATUS[$COUNT]="BLOCKED" # 当前状态：已禁Ping
-    else
-        STATUS[$COUNT]="ALLOWED" # 当前状态：允许Ping
-    fi
-    
-    # 【核心修改】默认全是 FALSE (OFF)，绝不自动勾选
-    SELECTED[$COUNT]="FALSE"
+    # 真实状态检测
+    if eval "$4"; then STATUS[$COUNT]="BLOCKED"; else STATUS[$COUNT]="ALLOWED"; fi
+    SELECTED[$COUNT]="FALSE" # 默认不选中，由用户手动决定
 }
 
-# --- 3. 审计逻辑 ---
 audit_all() {
-    if [ -z "$MSG" ]; then
-        ui_info "正在检测 ICMP 策略 (防火墙: $FW_TYPE)..."
-    fi
-
+    COUNT=0
     # [1] 内核层 Sysctl
     add_item "内核层禁 Ping (仅IPv4)" "底层屏蔽，极低资源占用" "无法屏蔽 IPv6" \
         "sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null | grep -q '1'"
 
     # [2] 防火墙层
-    local fw_check_cmd="false"
+    local fw_cmd="false"
     case "$FW_TYPE" in
-        firewalld) fw_check_cmd="firewall-cmd --query-icmp-block=echo-request >/dev/null 2>&1" ;;
-        ufw)       fw_check_cmd="grep -q 'DISABLE_PING' /etc/ufw/before.rules 2>/dev/null" ;;
-        iptables)  fw_check_cmd="iptables -C INPUT -p icmp --icmp-type echo-request -j DROP >/dev/null 2>&1" ;;
-        nftables)  fw_check_cmd="nft list ruleset | grep -q 'icmp type echo-request .* drop'" ;;
-        *)         fw_check_cmd="false" ;;
+        firewalld) fw_cmd="firewall-cmd --query-icmp-block=echo-request >/dev/null 2>&1" ;;
+        ufw)       fw_cmd="grep -q 'DISABLE_PING' /etc/ufw/before.rules 2>/dev/null" ;;
+        iptables)  fw_cmd="iptables -C INPUT -p icmp --icmp-type echo-request -j DROP >/dev/null 2>&1" ;;
+        nftables)  fw_cmd="nft list ruleset | grep -q 'icmp type echo-request .* drop'" ;;
     esac
     
-    add_item "防火墙禁 Ping (IPv4/v6)" "全面隐身，包含 IPv6" "属于防火墙规则变更" \
-        "$fw_check_cmd"
+    add_item "防火墙禁 Ping (IPv4/v6)" "全面隐身，包含 IPv6" "属于防火墙规则变更" "$fw_cmd"
 }
 
-# --- 4. 执行修复/恢复 ---
+# --- 3. 执行应用逻辑 ---
 apply_action() {
     local id=$1
     local title="${TITLES[$id]}"
     
-    # 逻辑定义：
-    # [ ON ]  = 执行禁止操作 (Block)
-    # [ OFF ] = 执行允许操作 (Allow)
-    
     if [ "${SELECTED[$id]}" == "TRUE" ]; then
-        # === 用户选择了开启 (禁Ping) ===
-        echo -e "   ${CYAN}>> 执行: 🚫 禁止 Ping ($title)...${RESET}"
+        # === 执行禁止 (Block) ===
+        echo -e "   ${CYAN}>> 执行: ${I_LOCK} 禁用 Ping ($title)...${RESET}"
         case "$title" in
             *"内核层"*)
-                cat > "/etc/sysctl.d/99-disable-ping.conf" <<EOF
-net.ipv4.icmp_echo_ignore_all = 1
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-EOF
-                sysctl --system >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1
-                ;;
+                echo "net.ipv4.icmp_echo_ignore_all = 1" > /etc/sysctl.d/99-disable-ping.conf
+                sysctl --system >/dev/null 2>&1 ;;
             *"防火墙"*)
                 case "$FW_TYPE" in
-                    firewalld)
-                        firewall-cmd --add-icmp-block=echo-request >/dev/null 2>&1
-                        firewall-cmd --permanent --add-icmp-block=echo-request >/dev/null 2>&1
-                        firewall-cmd --reload >/dev/null 2>&1 ;;
-                    ufw)
-                        [ -f /etc/ufw/before.rules ] && grep -q "DISABLE_PING" /etc/ufw/before.rules || cat >>/etc/ufw/before.rules <<'EOF'
-# DISABLE_PING: drop ICMP echo-request
--A ufw-before-input -p icmp --icmp-type echo-request -j DROP
-EOF
-                        [ -f /etc/ufw/before6.rules ] && grep -q "DISABLE_PING" /etc/ufw/before6.rules || cat >>/etc/ufw/before6.rules <<'EOF'
-# DISABLE_PING: drop ICMPv6 echo-request
--A ufw6-before-input -p icmpv6 --icmpv6-type echo-request -j DROP
-EOF
+                    firewalld) firewall-cmd --add-icmp-block=echo-request --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 ;;
+                    ufw) 
+                        [ -f /etc/ufw/before.rules ] && ! grep -q "DISABLE_PING" /etc/ufw/before.rules && sed -i '/ufw-before-input.*-j DROP/i # DISABLE_PING\n-A ufw-before-input -p icmp --icmp-type echo-request -j DROP' /etc/ufw/before.rules
                         ufw reload >/dev/null 2>&1 ;;
-                    iptables)
-                        iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -I INPUT -p icmp --icmp-type echo-request -j DROP
-                        if cmd_exists ip6tables; then
-                            ip6tables -C INPUT -p icmpv6 --icmpv6-type echo-request -j DROP 2>/dev/null || ip6tables -I INPUT -p icmpv6 --icmpv6-type echo-request -j DROP
-                        fi
-                        mkdir -p /etc/iptables 2>/dev/null
-                        iptables-save > /etc/iptables/rules.v4 2>/dev/null ;;
-                esac
-                ;;
+                    iptables) iptables -I INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ;;
+                esac ;;
         esac
     else
-        # === 用户选择了关闭 (允许Ping) ===
-        # 这里只有当状态是 BLOCKED 时才需要执行恢复，避免重复操作，但强制执行也没坏处
-        echo -e "   ${CYAN}>> 执行: 🟢 允许 Ping ($title)...${RESET}"
+        # === 执行恢复 (Allow) ===
+        echo -e "   ${CYAN}>> 执行: ${I_UNLOCK} 恢复 Ping ($title)...${RESET}"
         case "$title" in
-            *"内核层"*)
-                rm -f "/etc/sysctl.d/99-disable-ping.conf"
-                sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1
-                sysctl -w net.ipv4.icmp_echo_ignore_broadcasts=0 >/dev/null 2>&1
-                ;;
+            *"内核层"*) rm -f /etc/sysctl.d/99-disable-ping.conf; sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1 ;;
             *"防火墙"*)
                 case "$FW_TYPE" in
-                    firewalld)
-                        firewall-cmd --remove-icmp-block=echo-request >/dev/null 2>&1
-                        firewall-cmd --permanent --remove-icmp-block=echo-request >/dev/null 2>&1
-                        firewall-cmd --reload >/dev/null 2>&1 ;;
-                    ufw)
-                        sed -i '/DISABLE_PING/,+2d' /etc/ufw/before.rules 2>/dev/null
-                        sed -i '/DISABLE_PING/,+2d' /etc/ufw/before6.rules 2>/dev/null
-                        ufw reload >/dev/null 2>&1 ;;
-                    iptables)
-                        while iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null; do :; done
-                        if cmd_exists ip6tables; then
-                            while ip6tables -D INPUT -p icmpv6 --icmpv6-type echo-request -j DROP 2>/dev/null; do :; done
-                        fi
-                        iptables-save > /etc/iptables/rules.v4 2>/dev/null ;;
-                esac
-                ;;
+                    firewalld) firewall-cmd --remove-icmp-block=echo-request --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 ;;
+                    ufw) sed -i '/DISABLE_PING/,+1d' /etc/ufw/before.rules 2>/dev/null; ufw reload >/dev/null 2>&1 ;;
+                    iptables) while iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null; do :; done ;;
+                esac ;;
         esac
     fi
 }
 
-# --- 5. 主逻辑 ---
+# --- 4. 主循环界面 ---
 detect_firewall
 audit_all
 
@@ -166,23 +129,15 @@ while true; do
     echo "${BLUE}--------------------------------------------------------------------------------${RESET}"
     
     for ((i=1; i<=COUNT; i++)); do
-        # 1. 显示当前真实状态
-        if [ "${STATUS[$i]}" == "BLOCKED" ]; then 
-            S_TXT="${GREEN}已隐身 (禁Ping)${RESET}"
-        else 
-            S_TXT="${RED}可探测 (允许Ping)${RESET}"
-        fi
-        
-        # 2. 显示开关状态 (你的选择)
+        # 显示当前状态
+        if [ "${STATUS[$i]}" == "BLOCKED" ]; then S_TXT="${GREEN}${I_LOCK} 已隐身${RESET}"; else S_TXT="${RED}${I_UNLOCK} 可探测${RESET}"; fi
+        # 显示选择目标
         if [ "${SELECTED[$i]}" == "TRUE" ]; then 
-            SEL_ICON="${GREEN}[ ON  ]${RESET}"
-            ACTION_TXT="将被禁止 (Block)"
+            SEL_ICON="${GREEN}[ ON  ]${RESET}"; ACTION_TXT="将被禁止 (Block)"
         else 
-            SEL_ICON="${GREY}[ OFF ]${RESET}"
-            ACTION_TXT="将被允许 (Allow)"
+            SEL_ICON="${GREY}[ OFF ]${RESET}"; ACTION_TXT="将被允许 (Allow)"
         fi
         
-        # 卡片式显示
         printf "${GREY}%2d.${RESET}  %b  %b%s${RESET}\n" "$i" "$SEL_ICON" "$WHITE" "${TITLES[$i]}"
         printf "     ├─ 当前: %b   ${GREY}|${RESET} 优点: ${CYAN}%s${RESET}\n" "$S_TXT" "${PROS[$i]}"
         printf "     └─ 目标: ${YELLOW}%s${RESET}\n" "$ACTION_TXT"
@@ -190,47 +145,29 @@ while true; do
     done
     
     echo "${BLUE}================================================================================${RESET}"
-    if [ -n "$MSG" ]; then
-        echo -e "${YELLOW}💬 状态更新: $MSG${RESET}"
-        MSG=""
-        echo "${BLUE}--------------------------------------------------------------------------------${RESET}"
-    fi
-
-    echo -e "含义: ${GREEN}[ ON  ]${RESET} = 我要禁止 Ping  |  ${GREY}[ OFF ]${RESET} = 我要允许 Ping"
-    echo -e "提示: ${WHITE}默认全为 OFF，请手动选择你要禁止的项目，然后按 r 执行${RESET}"
-    echo -e "指令: ${YELLOW}a${RESET}=全禁 | ${YELLOW}n${RESET}=全放 | ${RED}r${RESET}=应用更改 | ${CYAN}q${RESET}=退出"
-    echo -ne "请输入: "
+    [ -n "$MSG" ] && { echo -e "${YELLOW}${I_INFO} 状态更新: $MSG${RESET}"; MSG=""; }
+    echo -e "含义: ${GREEN}[ ON ]${RESET}=我要禁用 | ${GREY}[ OFF ]${RESET}=我要放行"
+    echo -e "指令: ${YELLOW}a${RESET}=全禁 | ${YELLOW}n${RESET}=全放 | ${RED}r${RESET}=应用更改 | ${CYAN}q${RESET}=返回主菜单"
+    echo -ne "请输入编号翻转或指令: "
     
     read -r RawInput 
     input=$(echo "$RawInput" | tr ',' ' ' | xargs)
 
     case "$input" in
-        a|A) for ((i=1; i<=COUNT; i++)); do SELECTED[$i]="TRUE"; done; MSG="已设置：全部禁止 Ping" ;;
-        n|N) for ((i=1; i<=COUNT; i++)); do SELECTED[$i]="FALSE"; done; MSG="已设置：全部允许 Ping" ;;
-        q|Q) clear; exit 0 ;;
+        a|A) for ((i=1; i<=COUNT; i++)); do SELECTED[$i]="TRUE"; done; MSG="已全部设为禁用状态" ;;
+        n|N) for ((i=1; i<=COUNT; i++)); do SELECTED[$i]="FALSE"; done; MSG="已全部设为放行状态" ;;
+        q|Q) clear; exit 0 ;; # 返回主控台
         r|R) 
             echo ""; ui_info "正在应用 ICMP 策略..."
             for ((i=1; i<=COUNT; i++)); do apply_action "$i"; done
-            echo ""; ui_ok "设置完成。"
-            # 刷新状态
-            COUNT=0; audit_all
-            echo -ne "${YELLOW}按回车键刷新显示...${RESET}"; read -r
-            ;;
+            ui_ok "操作完成。"
+            audit_all # 刷新状态
+            sleep 2 ;;
         *)
-            MSG=""
             for num in $input; do
                 if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "$COUNT" ]; then
-                    title="${TITLES[$num]}"
-                    if [ "${SELECTED[$num]}" == "TRUE" ]; then 
-                        SELECTED[$num]="FALSE"
-                        MSG="${MSG} ${RED}[设为:允许]${RESET} $title;"
-                    else 
-                        SELECTED[$num]="TRUE"
-                        MSG="${MSG} ${GREEN}[设为:禁止]${RESET} $title;"
-                    fi
+                    [ "${SELECTED[$num]}" == "TRUE" ] && SELECTED[$num]="FALSE" || SELECTED[$num]="TRUE"
                 fi
-            done
-            if [ -z "$MSG" ]; then MSG="无效输入"; fi
-            ;;
+            done ;;
     esac
 done
