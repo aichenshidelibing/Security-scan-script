@@ -1,30 +1,49 @@
 #!/usr/bin/env bash
-# v2.sh - SSH 密钥配置与登录加固 (v3.0 颜值统一版)
-# 特性：卡片式UI + 自动备份旧密钥 + 防锁死强制确认 + 智能配置
+# <SEC_SCRIPT_MARKER_v2.3>
+# v2.sh - SSH 密钥配置与登录加固 (v3.2 智慧感知版)
+# 特性：ED25519生成 | 自动备份 | 防锁死强制确认 | 环境自适应UI
 
 set -u
 export LC_ALL=C
 
-# --- 变量 ---
-KEY_DIR="/root"
-KEY_PATH="${KEY_DIR}/id_ed25519"
-AUTH_KEYS="/root/.ssh/authorized_keys"
-SSHD_CONFIG="/etc/ssh/sshd_config"
-BACKUP_DIR="/root/ssh_key_backup_$(date +'%Y%m%d_%H%M%S')"
+# ---------- 统一自适应 UI 区 ----------
+# 优先读取主控台变量，读不到则本地检测
+if [ "${USE_EMOJI:-}" == "" ]; then
+    if [[ "${LANG:-}" =~ "UTF-8" ]] || [[ "${LANG:-}" =~ "utf8" ]]; then
+        USE_EMOJI="1"
+    else
+        USE_EMOJI="0"
+    fi
+fi
 
 # 颜色定义
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m'); 
 GREY=$(printf '\033[90m'); CYAN=$(printf '\033[36m'); WHITE=$(printf '\033[37m'); RESET=$(printf '\033[0m')
 BOLD=$(printf '\033[1m')
 
+# 根据环境定义图标
+if [ "$USE_EMOJI" == "1" ]; then
+    I_OK="✅"; I_WARN="⚠️ "; I_FAIL="❌"; I_INFO="ℹ️ "; I_DOWN="👇"; I_STOP="🛑"; I_KEY="🔐"
+else
+    I_OK="[  OK  ]"; I_WARN="[ WARN ]"; I_FAIL="[ FAIL ]"; I_INFO="[ INFO ]"; I_DOWN="[ v ]"; I_STOP="[ !!! ]"; I_KEY="[ KEY ]"
+fi
+# ------------------------------------
+
+# --- 变量与路径 ---
+KEY_DIR="/root"
+KEY_PATH="${KEY_DIR}/id_ed25519"
+AUTH_KEYS="/root/.ssh/authorized_keys"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+BACKUP_DIR="/root/ssh_key_backup_$(date +'%Y%m%d_%H%M%S')"
+
 # --- 辅助工具 ---
-ui_info() { echo -e "${CYAN}ℹ️  $*${RESET}"; }
-ui_ok()   { echo -e "${GREEN}✅ $*${RESET}"; }
-ui_warn() { echo -e "${YELLOW}⚠️  $*${RESET}"; }
-ui_fail() { echo -e "${RED}❌ $*${RESET}"; }
+ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
+ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
+ui_warn() { echo -e "${YELLOW}${I_WARN} $*${RESET}"; }
+ui_fail() { echo -e "${RED}${I_FAIL} $*${RESET}"; }
+ui_header() { echo -e "${BLUE}================================================================================${RESET}"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || { ui_fail "请以 root 运行本脚本"; exit 1; }; }
-sshd_bin() { command -v sshd 2>/dev/null || echo /usr/sbin/sshd; }
 
 # --- 1. 环境检测 ---
 check_status() {
@@ -99,20 +118,19 @@ install_pubkey() {
 show_private_key() {
     echo ""
     ui_info "步骤 3/4: 获取私钥 (关键)"
-    echo "${RED}========================================================${RESET}"
-    echo "${BOLD}👇 请立即复制下方【绿字内容】保存为文件 (如 key.pem) 👇${RESET}"
-    echo "${RED}========================================================${RESET}"
+    ui_header
+    echo -e "${RED}${BOLD}${I_DOWN} 请立即复制下方【绿字内容】保存为文件 (如 key.pem) ${I_DOWN}${RESET}"
+    ui_header
     echo "${GREEN}"
     cat "$KEY_PATH"
     echo "${RESET}"
-    echo "${RED}========================================================${RESET}"
+    ui_header
     echo ""
 }
 
 confirm_and_lock() {
     echo ""
-    echo "${RED}${BOLD}🛑 防锁死安全拦截 🛑${RESET}"
-    echo "请执行以下操作："
+    echo -e "${RED}${BOLD}${I_STOP} 防锁死安全拦截 ${I_STOP}${RESET}"
     echo "1. 不要关闭当前窗口！"
     echo "2. 新开一个 SSH 窗口，使用刚才保存的私钥尝试登录。"
     echo "3. 只有登录成功，才输入 yes 禁用密码登录。"
@@ -149,9 +167,9 @@ clear
 need_root
 check_status
 
-echo "${BLUE}================================================================================${RESET}"
-echo "${BOLD} SSH 密钥配置与加固工具 (v3.0)${RESET}"
-echo "${BLUE}--------------------------------------------------------------------------------${RESET}"
+ui_header
+echo -e "${BOLD} ${I_KEY} SSH 密钥配置与加固工具 (v3.2)${RESET}"
+ui_header
 
 # 卡片式状态展示
 printf "${GREY}当前配置状态：${RESET}\n"
@@ -162,9 +180,9 @@ echo ""
 echo "${YELLOW}本脚本将执行：${RESET}"
 echo "  1. 生成全新的 ED25519 密钥对"
 echo "  2. 将公钥自动写入 authorized_keys"
-echo "  3. 显示私钥供您下载"
+echo "  3. 显示私钥供您下载保存"
 echo "  4. (确认后) 关闭密码登录，仅允许密钥登录"
-echo "${BLUE}================================================================================${RESET}"
+ui_header
 
 echo -ne "${GREEN}按回车键开始配置 (Ctrl+C 退出)...${RESET}"
 read -r
@@ -176,7 +194,7 @@ show_private_key
 
 # 确认锁定
 if confirm_and_lock; then
-    # 重启服务逻辑 (复用 v1 风格)
+    # 重启服务逻辑
     echo ""
     ui_info "最后一步：重启服务生效"
     echo "1. 重载 SSH (Reload) [推荐]"
@@ -192,8 +210,11 @@ if confirm_and_lock; then
     
     echo ""
     ui_ok "v2.sh 执行完毕。"
-    ui_info "下一步：运行 ./v3.sh 设置禁Ping (可选)。"
 else
     echo ""
     ui_warn "脚本已退出，未执行重启，密码登录未关闭。"
 fi
+
+# === 关键：平滑返回主控台 ===
+echo -ne "\n${YELLOW}${I_INFO} 按任意键返回主控台菜单...${RESET}"
+read -n 1 -s -r
