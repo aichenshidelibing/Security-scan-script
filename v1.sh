@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v32.0 智能DNS·全量终极版)
-# 特性：智能DNS判断(不盲目覆盖) | 36项全量 | 救砖自愈 | 防卡死 | 进度条
+# v1.sh - Linux 基础安全加固 (v32.1 批量极速安装版)
+# 特性：软件批量安装(不再卡锁) | 智能DNS | 33项全量 | 救砖自愈 | 进度条
 
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
@@ -54,6 +54,7 @@ handle_lock() {
     local count=0; while fuser "$lock" >/dev/null 2>&1 && [ $count -lt 5 ]; do sleep 1; count=$((count+1)); done
     if fuser "$lock" >/dev/null 2>&1; then
         local pid=$(fuser "$lock" 2>/dev/null | awk '{print $NF}')
+        # 强制静默解锁，防止小白卡死
         kill -9 "$pid" 2>/dev/null
         rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null
         dpkg --configure -a >/dev/null 2>&1
@@ -91,32 +92,25 @@ fix_eol_sources() {
     fi
 }
 
-# --- 智能 DNS 修复 (v32.0 新增) ---
+# --- 智能 DNS ---
 smart_dns_fix() {
-    # 1. 尝试 ping 权威地址，如果通，说明 DNS 正常，直接跳过
     if ping -c 1 -W 2 google.com >/dev/null 2>&1 || ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
-        ui_ok "网络连接正常，保留当前 DNS 设置。"
+        ui_ok "网络正常，保留当前 DNS。"
         return 0
     fi
-
-    # 2. 如果不通，尝试检测是否为国内机器 (ping 百度)
-    ui_warn "网络连接异常，正在尝试修复 DNS..."
+    ui_warn "网络异常，尝试修复 DNS..."
     if ping -c 1 -W 2 baidu.com >/dev/null 2>&1; then
-        ui_info "检测到国内网络环境，使用阿里云 DNS..."
         echo "nameserver 223.5.5.5" > /etc/resolv.conf
-        echo "nameserver 119.29.29.29" >> /etc/resolv.conf
     else
-        ui_info "检测到国际网络环境，使用 Google/CF DNS..."
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
     fi
-    ui_ok "DNS 已智能修正。"
+    ui_ok "DNS 已修正。"
 }
 
 # --- 全局环境自愈 ---
 heal_environment() {
     ui_info "正在进行环境自愈..."
-    smart_dns_fix # 只有在网不通时才修 DNS
+    smart_dns_fix
     handle_lock
     fix_eol_sources
     if command -v apt-get >/dev/null; then
@@ -127,28 +121,41 @@ heal_environment() {
     ui_ok "环境准备就绪。"
 }
 
-# --- 智能安装 ---
+# --- 核心修改：批量智能安装 ---
 smart_install() {
-    local pkg=$1
-    if command -v "$pkg" >/dev/null 2>&1; then return 0; fi
+    # 接收所有参数作为一个字符串，不加引号以允许单词分割
+    local pkgs="$*"
+    
+    # 检查是否全部已安装 (简单检查第一个即可，或者不做检查直接跑install)
+    # 为了效率，直接交给包管理器去判断谁需要安装，不重复造轮子
+    
     handle_lock
-    ui_info "安装: $pkg ..."
-    local log="/tmp/${pkg}_err.log"
+    ui_info "批量安装组件: $pkgs ..."
+    local log="/tmp/install_err.log"
+    
+    # 注意：这里 $pkgs 不加引号，让 shell 把它拆分成多个参数传递给 apt/yum
     if command -v apt-get >/dev/null; then
-        ( UCF_FORCE_CONFFOLD=1 apt-get install -y "$pkg" ) >/dev/null 2>"$log" &
+        ( UCF_FORCE_CONFFOLD=1 apt-get install -y $pkgs ) >/dev/null 2>"$log" &
     elif command -v dnf >/dev/null; then
-        dnf install -y "$pkg" >/dev/null 2>"$log" &
+        dnf install -y $pkgs >/dev/null 2>"$log" &
     elif command -v yum >/dev/null; then
-        yum install -y "$pkg" >/dev/null 2>"$log" &
+        yum install -y $pkgs >/dev/null 2>"$log" &
     else return 1; fi
+    
     local pid=$!
     show_spinner "$pid"
     wait "$pid"
-    [ $? -ne 0 ] && { ui_fail "$pkg 安装失败。"; return 1; }
-    rm -f "$log"; return 0
+    
+    if [ $? -ne 0 ]; then
+        ui_fail "部分软件安装失败，日志:"
+        tail -n 5 "$log" 2>/dev/null
+        return 1
+    fi
+    rm -f "$log"
+    return 0
 }
 
-# --- 数据定义 (36项全量) ---
+# --- 数据定义 (33项) ---
 declare -a TITLES PROS RISKS STATUS SELECTED IS_RISKY
 COUNT=0; MSG=""
 CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | tail -n 1); CUR_P=${CUR_P:-22}
@@ -171,35 +178,35 @@ is_eol() {
 }
 
 init_audit() {
-    # 1. 基础优化 (3项)
-    add_item "开启 TCP BBR 加速" "显著提升网络吞吐" "需内核支持" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr" "FALSE"
-    add_item "安装装机必备软件" "curl/wget/vim/htop/git" "占用少量空间" "command -v vim >/dev/null && command -v htop >/dev/null" "FALSE"
+    # 1. 基础优化
+    add_item "开启 TCP BBR 加速" "提升网络吞吐" "需内核支持" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr" "FALSE"
+    add_item "安装装机必备软件" "curl/wget/vim/htop/git" "少量空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
     add_item "智能 DNS 优化" "提升解析速度" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
 
-    # 2. SSH 安全 (9项)
+    # 2. SSH 安全
     add_item "强制 SSH 协议 V2" "修复旧版漏洞" "无" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
     add_item "开启公钥认证支持" "允许密钥登录" "无" "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止 SSH 空密码" "防止远程直连" "无" "grep -q '^PermitEmptyPasswords no' /etc/ssh/sshd_config" "FALSE"
-    add_item "修改 SSH 默认端口" "避开扫描" "需开新端口" "[ \"$CUR_P\" != \"22\" ]" "TRUE"
+    add_item "修改 SSH 默认端口" "避开爆破扫描" "需开新端口" "[ \"$CUR_P\" != \"22\" ]" "TRUE"
     add_item "禁用 SSH 密码认证" "彻底防爆破" "需预配密钥" "grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config" "TRUE"
     add_item "SSH 空闲超时(10m)" "防劫持" "自动断连" "grep -q '^ClientAliveInterval 600' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止 SSH Root 登录" "最高防护" "需建普通用户" "grep -q '^PermitRootLogin no' /etc/ssh/sshd_config" "TRUE"
     add_item "SSH 登录 Banner" "合规警告" "无" "grep -q '^Banner' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止环境篡改" "防Shell提权" "无" "grep -q '^PermitUserEnvironment no' /etc/ssh/sshd_config" "FALSE"
 
-    # 3. 账户安全 (3项)
+    # 3. 账户安全
     add_item "强制 10 位混合密码" "提高爆破难度" "改密麻烦" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null || grep -q 'minlen=10' /etc/pam.d/system-auth 2>/dev/null" "FALSE"
     add_item "密码修改最小间隔" "防盗号改密" "7天禁改" "grep -q 'PASS_MIN_DAYS[[:space:]]*7' /etc/login.defs" "FALSE"
     add_item "Shell 自动注销(10m)" "离机安全" "强制退出" "grep -q 'TMOUT=600' /etc/profile" "FALSE"
 
-    # 4. 文件权限 (5项)
+    # 4. 权限与文件
     add_item "修正 /etc/passwd" "防非法修改" "无" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]" "FALSE"
     add_item "修正 /etc/shadow" "防泄露哈希" "无" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]" "FALSE"
     add_item "修正 sshd_config" "保护配置" "无" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]" "FALSE"
     add_item "修正 authorized_keys" "保护公钥" "无" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]" "FALSE"
     add_item "清理危险 SUID" "堵死提权" "无法ping" "[ ! -u /bin/mount ]" "FALSE"
 
-    # 5. 限制与加固 (6项)
+    # 5. 限制与加固
     add_item "锁定异常 UID=0" "清后门账号" "误锁管理" "[ -z \"\$(awk -F: '(\$3 == 0 && \$1 != \"root\"){print \$1}' /etc/passwd)\" ]" "TRUE"
     add_item "移除 Sudo 免密" "防静默提权" "脚本适配" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1" "TRUE"
     add_item "限制 su 仅 wheel" "缩减Root范围" "需加组" "grep -q 'pam_wheel.so' /etc/pam.d/su || grep -q 'pam_wheel.so' /etc/pam.d/system-auth" "FALSE"
@@ -207,14 +214,14 @@ init_audit() {
     add_item "扩展 SUID 清理" "宝塔推荐" "更多限制" "[ ! -u /usr/bin/wall ]" "FALSE"
     add_item "锁定 Bootloader" "防物理篡改" "影响Grub" "[ \"\$(stat -c %a /boot/grub/grub.cfg 2>/dev/null)\" == \"600\" ]" "FALSE"
 
-    # 6. 内核防御 (5项)
+    # 6. 内核防御
     add_item "网络内核防欺骗" "防ICMP重定向" "无" "sysctl net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '= 0'" "FALSE"
     add_item "开启 SYN Cookie" "防DDoS" "无" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'" "FALSE"
     add_item "禁用高危协议" "封堵漏洞" "应用受限" "[ -f /etc/modprobe.d/disable-uncommon.conf ]" "FALSE"
-    add_item "禁用非常用文件系统" "宝塔推荐" "禁JFFS2/UDF" "[ -f /etc/modprobe.d/disable-filesystems.conf ]" "FALSE"
+    add_item "禁用非常用文件系统" "宝塔推荐" "禁JFFS2" "[ -f /etc/modprobe.d/disable-filesystems.conf ]" "FALSE"
     add_item "记录恶意数据包" "监控Martian" "增加日志" "sysctl net.ipv4.conf.all.log_martians 2>/dev/null | grep -q '= 1'" "FALSE"
 
-    # 7. 审计与更新 (5项)
+    # 7. 审计与更新
     add_item "时间同步(Chrony)" "日志对准" "无" "command -v chronyd >/dev/null || systemctl is-active --quiet systemd-timesyncd" "FALSE"
     add_item "日志自动轮转(500M)" "防磁盘爆满" "减少记录" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf" "FALSE"
     add_item "Fail2ban 最佳防护" "自动封禁IP" "误输也封" "command -v fail2ban-server >/dev/null" "FALSE"
@@ -231,10 +238,12 @@ apply_fix() {
             if uname -r | grep -q "^[5-9]"; then
                 echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf; echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf; sysctl -p >/dev/null 2>&1; ui_ok "BBR 已开启。"
             else ui_fail "内核版本过低 (<4.9)，不支持 BBR。"; fi ;;
+        
         "安装装机必备软件")
-            smart_install "curl"; smart_install "wget"; smart_install "vim"; smart_install "unzip"; smart_install "htop"; smart_install "git"; smart_install "net-tools" ;;
-        "智能 DNS 优化")
-            smart_dns_fix ;; # 核心改动：调用智能判断函数
+            # 核心修改：一次性传入所有包名，不加引号，让 apt/yum 一次性处理！
+            smart_install "curl wget vim unzip htop git net-tools" ;;
+            
+        "智能 DNS 优化") smart_dns_fix ;;
         "强制 SSH 协议 V2") sed -i '/^Protocol/d' /etc/ssh/sshd_config; echo "Protocol 2" >> /etc/ssh/sshd_config ;;
         "开启公钥认证支持") sed -i '/^PubkeyAuthentication/d' /etc/ssh/sshd_config; echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config ;;
         "禁止 SSH 空密码") sed -i '/^PermitEmptyPasswords/d' /etc/ssh/sshd_config; echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config ;;
@@ -249,7 +258,7 @@ apply_fix() {
         "禁止 SSH Root 登录") sed -i '/^PermitRootLogin/d' /etc/ssh/sshd_config; echo "PermitRootLogin no" >> /etc/ssh/sshd_config ;;
         "SSH 登录 Banner") echo "Restricted Access." > /etc/ssh/banner_warn; sed -i '/^Banner/d' /etc/ssh/sshd_config; echo "Banner /etc/ssh/banner_warn" >> /etc/ssh/sshd_config ;;
         "禁止环境篡改") sed -i '/^PermitUserEnvironment/d' /etc/ssh/sshd_config; echo "PermitUserEnvironment no" >> /etc/ssh/sshd_config ;;
-        "强制 10 位混合密码") smart_install "libpam-pwquality" || smart_install "libpwquality"
+        "强制 10 位混合密码") smart_install "libpam-pwquality libpwquality" # 尝试同时安装，有一个成功就行
             [ -f /etc/pam.d/common-password ] && sed -i '/pwquality.so/c\password requisite pam_pwquality.so retry=3 minlen=10 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=0' /etc/pam.d/common-password ;;
         "密码修改最小间隔") sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS 7/' /etc/login.defs; chage --mindays 7 root 2>/dev/null ;;
         "Shell 自动注销(10m)") grep -q "TMOUT=600" /etc/profile || echo -e "export TMOUT=600\nreadonly TMOUT" >> /etc/profile ;;
@@ -262,7 +271,7 @@ apply_fix() {
         "移除 Sudo 免密") sed -i 's/NOPASSWD/PASSWD/g' /etc/sudoers; grep -l "NOPASSWD" /etc/sudoers.d/* 2>/dev/null | xargs -r sed -i 's/^/# /' ;;
         "限制 su 仅 wheel") ! grep -q "pam_wheel.so" /etc/pam.d/su && echo "auth required pam_wheel.so use_uid" >> /etc/pam.d/su ;;
         "限制编译器权限") 
-            local gcc_path=$(command -v gcc); if [ -n "$gcc_path" ]; then local real_path=$(readlink -f "$gcc_path"); chmod 700 "$real_path"; ui_ok "编译器 $real_path 限制完成。"; fi ;;
+            local gcc_path=$(command -v gcc); if [ -n "$gcc_path" ]; then local real_path=$(readlink -f "$gcc_path"); chmod 700 "$real_path"; ui_ok "编译器限制完成。"; fi ;;
         "扩展 SUID 清理") chmod u-s /usr/bin/wall /usr/bin/chage /usr/bin/gpasswd /usr/bin/chfn /usr/bin/chsh 2>/dev/null ;;
         "锁定 Bootloader") [ -f /boot/grub/grub.cfg ] && chmod 600 /boot/grub/grub.cfg ;;
         "网络内核防欺骗") echo "net.ipv4.conf.all.accept_redirects = 0" > /etc/sysctl.d/99-sec.conf; sysctl --system >/dev/null 2>&1 ;;
@@ -281,7 +290,7 @@ maxretry = 5
 enabled = true
 EOF
             systemctl enable --now fail2ban >/dev/null 2>&1; } ;;
-        "每日自动更新组件") smart_install "unattended-upgrades" || smart_install "dnf-automatic"; systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 ;;
+        "每日自动更新组件") smart_install "unattended-upgrades dnf-automatic"; systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 ;;
         "立即修复高危漏洞")
              if is_eol; then ui_fail "系统过老已停更，跳过。"; else
                  handle_lock
