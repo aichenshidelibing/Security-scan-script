@@ -1,5 +1,5 @@
 # 🛡️ Linux Security Toolbox & Genesis Manager
-> **全维度 Linux 安全审计、工业级自动化加固与性能优化全能管家**
+> **全维度 Linux 安全审计，自动化加固与性能优化全能管家**
 
 [![Bash Shell](https://img.shields.io/badge/Language-Bash%20Shell-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu%20%7C%20CentOS%20%7C%20RHEL-blue.svg)](https://linux.org/)
