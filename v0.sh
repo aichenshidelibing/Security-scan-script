@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v0.sh - Linux 全维安全审计系统 (v2.1 交互体验完美版)
-# 特性：36项全量检测 | 硬件仪表盘 | 可视化评分 | 完美衔接主控台
+# v0.sh - Linux 全维安全审计系统 (v2.2 紧急修复版)
+# 特性：修复函数名错误 | 36项全量对齐 | 硬件仪表盘 | 可视化评分
 
 export LC_ALL=C
 
@@ -21,11 +21,11 @@ else
 fi
 
 # =======================================================================
-# [核心防闪退] 仅在异常退出/中断时触发，正常返回不触发
+# [核心防闪退]
 # =======================================================================
 trap_triggered=0
 finish_trap() {
-    [ "$trap_triggered" -eq 1 ] && return # 如果已正常处理，不再触发
+    [ "$trap_triggered" -eq 1 ] && return
     echo -e "\n\033[33m[系统提示] 审计被中断。按回车键返回...\033[0m"
     read -r
 }
@@ -107,7 +107,8 @@ CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | ta
 check_gcc() { local g=$(command -v gcc); [ -z "$g" ] || [ "$(stat -c %a "$(readlink -f "$g")")" == "700" ]; }
 is_eol() { if [ -f /etc/os-release ]; then . /etc/os-release; [[ "$ID" == "debian" && "$VERSION_ID" -lt 10 ]] && return 0; [[ "$ID" == "ubuntu" && "${VERSION_ID%%.*}" -lt 16 ]] && return 0; [[ "$ID" == "centos" && "$VERSION_ID" -lt 7 ]] && return 0; fi; return 1; }
 
-run_audits() {
+# [关键修正] 函数名改为 init_audits 以匹配调用
+init_audits() {
     # 1. 基础
     add_audit "基础" "TCP BBR" "检测 BBR 加速" "建议开启以提升网速" "low" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr"
     add_audit "基础" "必备软件" "检测常用工具" "建议安装 curl/wget/vim 等" "info" "command -v vim >/dev/null && command -v htop >/dev/null"
@@ -197,7 +198,7 @@ print_report() {
     
     [ $SCORE -lt 100 ] && echo -e "\n${YELLOW}${I_WARN} 发现风险项！请运行 ${CYAN}v1.sh${YELLOW} 进行一键修复。${RESET}"
     
-    # === 关键：正常结束标志，防止 Trap 触发 ===
+    # === 关键：正常结束标志 ===
     trap_triggered=1
     echo -ne "\n${YELLOW}${I_INFO} 审计完成。按任意键返回主控台菜单...${RESET}"
     read -n 1 -s -r
@@ -206,5 +207,5 @@ print_report() {
 # --- 主流程 ---
 clear
 get_sys_info
-init_audits
+init_audits # 修正调用
 print_report
