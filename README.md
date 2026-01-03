@@ -42,8 +42,8 @@ wget -qO install.sh https://raw.githubusercontent.com/aichenshidelibing/Security
 ```bash
 wget -qO install.sh https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
 ```
-```bash
 #下载后如何使用，请看这里：
+```bash
 chmod +x install.sh && ./install.sh
 ```
 ⚠️ 免责声明
