@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v22.0 终极完美版)
+# v1.sh - Linux 基础安全加固 (v22.1 工业级防闪退终极版)
 
 set -u
 export LC_ALL=C
 
-# --- [信号捕获] ---
+# --- [信号捕获] 确保 Ctrl+C 优雅返回主菜单 ---
 trap 'echo -e "\n${YELLOW}操作取消，返回主菜单...${RESET}"; sleep 1; exit 0' INT
 
 # --- [UI 自适应] ---
@@ -34,18 +34,21 @@ check_space() { [ $(df / | awk 'NR==2 {print $4}') -lt 204800 ] && { ui_fail "�
 handle_lock() {
     local lock="/var/lib/dpkg/lock-frontend"
     [ ! -f "$lock" ] || ! fuser "$lock" >/dev/null 2>&1 && return 0
-    ui_warn "检测到 APT 锁。尝试等待 5 秒..."
+    ui_warn "检测到更新锁。等待 5 秒..."
     local count=0; while fuser "$lock" >/dev/null 2>&1 && [ $count -lt 5 ]; do sleep 1; count=$((count+1)); done
     if fuser "$lock" >/dev/null 2>&1; then
-        echo -e "${YELLOW}锁未释放。请选: [1] 接着等 [2] 跳过 [3] 强制杀掉进程(PID:$(fuser "$lock" 2>/dev/null))${RESET}"
-        read -p "选择: " c
-        [ "$c" == "3" ] && { kill -9 $(fuser "$lock" 2>/dev/null); rm -f "$lock"; return 0; }
-        [ "$c" == "1" ] && handle_lock || return 1
+        echo -ne "${YELLOW}锁未释放。请选: [1] 接着等 [2] 跳过 [3] 强制解锁(PID:$(fuser "$lock" 2>/dev/null | awk '{print $NF}')): ${RESET}"
+        read -r c
+        case "$c" in
+            3) local pid=$(fuser "$lock" 2>/dev/null | awk '{print $NF}'); [ -n "$pid" ] && kill -9 "$pid"; rm -f "$lock"; return 0 ;;
+            1) handle_lock ;;
+            *) return 1 ;;
+        esac
     fi; return 0
 }
 
 smart_install() {
-    local pkg=$1; [ -x "/usr/bin/$pkg" ] || command -v "$pkg" >/dev/null && return 0
+    local pkg=$1; [ -x "/usr/sbin/$pkg" ] || [ -x "/usr/bin/$pkg" ] || command -v "$pkg" >/dev/null && return 0
     check_space || return 1; handle_lock || return 1
     ui_info "安装: $pkg ..."
     local log="/tmp/${pkg}_err.log"
@@ -53,7 +56,7 @@ smart_install() {
     elif command -v dnf >/dev/null; then dnf install -y "$pkg" >/dev/null 2>"$log" &
     else return 1; fi
     show_spinner $!; wait $!
-    [ $? -ne 0 ] && { ui_fail "$pkg 失败。日志:"; cat "$log"; rm -f "$log"; return 1; }
+    [ $? -ne 0 ] && { ui_fail "$pkg 失败。日志:"; [ -f "$log" ] && cat "$log"; rm -f "$log"; return 1; }
     rm -f "$log"; return 0
 }
 
@@ -61,23 +64,20 @@ smart_install() {
 declare -a TITLES PROS RISKS STATUS SELECTED IS_RISKY
 COUNT=0; MSG=""
 CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | tail -n 1); CUR_P=${CUR_P:-22}
+TARGET_P="$CUR_P"
 
 add_item() {
     COUNT=$((COUNT+1)); TITLES[$COUNT]="$1"; PROS[$COUNT]="$2"; RISKS[$COUNT]="$3"; IS_RISKY[$COUNT]="$5"
-    if eval "$4"; then STATUS[$COUNT]="PASS"; SELECTED[$COUNT]="FALSE"
-    else STATUS[$COUNT]="FAIL"; [ "$5" == "TRUE" ] && SELECTED[$COUNT]="FALSE" || SELECTED[$COUNT]="TRUE"; fi
+    eval "$4" && { STATUS[$COUNT]="PASS"; SELECTED[$COUNT]="FALSE"; } || { STATUS[$COUNT]="FAIL"; [ "$5" == "TRUE" ] && SELECTED[$COUNT]="FALSE" || SELECTED[$COUNT]="TRUE"; }
 }
 
-# 判定 EOL (老系统检测)
-is_os_eol() {
-    local ver=$(cat /etc/debian_version 2>/dev/null | cut -d. -f1)
-    # 示例：Debian 9 及以下判定为 EOL
-    if [[ -n "$ver" ]] && [[ "$ver" -lt 10 ]]; then return 0; fi
-    return 1
+is_eol() {
+    local deb_v=$(cat /etc/debian_version 2>/dev/null | cut -d. -f1)
+    [[ -n "$deb_v" && "$deb_v" -lt 10 ]] && return 0 || return 1
 }
 
 init_audit() {
-    # 1-8: SSH 核心
+    # 1-8: SSH
     add_item "强制 SSH 协议 V2" "修复旧版漏洞" "无" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
     add_item "开启公钥认证支持" "允许密钥登录" "无" "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止 SSH 空密码" "防止远程直连" "无" "grep -q '^PermitEmptyPasswords no' /etc/ssh/sshd_config" "FALSE"
@@ -86,51 +86,46 @@ init_audit() {
     add_item "SSH 空闲超时(10m)" "防范劫持" "自动断连" "grep -q '^ClientAliveInterval 600' /etc/ssh/sshd_config" "FALSE"
     add_item "SSH 登录 Banner" "合规警告" "无" "grep -q '^Banner' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止环境篡改" "防Shell提权" "无" "grep -q '^PermitUserEnvironment no' /etc/ssh/sshd_config" "FALSE"
-    
-    # 9-11: 账户密码
-    add_item "强制 10 位混合密码" "极大提高门槛" "需改密" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null" "FALSE"
+    # 9-11: 账户
+    add_item "强制 10 位混合密码" "提高暴力破解成本" "需改密" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null" "FALSE"
     add_item "密码修改最小间隔" "防盗号快速改密" "7天禁再改" "grep -q 'PASS_MIN_DAYS[[:space:]]*7' /etc/login.defs" "FALSE"
-    add_item "Shell 自动注销(10m)" "离机物理安全" "不活跃退出" "grep -q 'TMOUT=600' /etc/profile" "FALSE"
-    
-    # 12-16: 关键权限
-    add_item "修正 /etc/passwd" "防止非法改号" "无" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]" "FALSE"
-    add_item "修正 /etc/shadow" "防止泄露哈希" "无" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]" "FALSE"
-    add_item "修正 sshd_config" "保护核心配置" "无" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]" "FALSE"
+    add_item "Shell 自动注销(10m)" "终端离机安全" "自动退出" "grep -q 'TMOUT=600' /etc/profile" "FALSE"
+    # 12-16: 权限
+    add_item "修正 /etc/passwd" "防止非法账号篡改" "无" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]" "FALSE"
+    add_item "修正 /etc/shadow" "防止泄露密码哈希" "无" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]" "FALSE"
+    add_item "修正 sshd_config" "保护SSH核心配置" "无" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]" "FALSE"
     add_item "修正 authorized_keys" "保护授权公钥" "无" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]" "FALSE"
-    add_item "清理危险 SUID" "堵死提权路径" "无法ping/mount" "[ ! -u /bin/mount ]" "FALSE"
-    
-    # 17-20: 后门与限制
+    add_item "清理危险 SUID" "堵死提权路径" "无" "[ ! -u /bin/mount ]" "FALSE"
+    # 17-20: 限制
     add_item "锁定异常 UID=0" "清除后门账号" "误锁管理员" "[ -z \"\$(awk -F: '(\$3 == 0 && \$1 != \"root\"){print \$1}' /etc/passwd)\" ]" "TRUE"
-    add_item "移除 Sudoers 免密" "防止静默提权" "脚本需适配" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1" "TRUE"
-    add_item "限制 su 仅 wheel 组" "缩减Root范围" "需手动加组" "grep -q 'pam_wheel.so' /etc/pam.d/su" "FALSE"
-    add_item "限制编译器权限" "防止编译提权包" "管理员不受限" "[ \"\$(stat -c %a /usr/bin/gcc 2>/dev/null)\" == \"700\" ] || [ ! -f /usr/bin/gcc ]" "FALSE"
-    
-    # 21-23: 内核防御
+    add_item "移除 Sudoers 免密" "防止静默提权" "影响脚本" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1" "TRUE"
+    add_item "限制 su 仅 wheel 组" "缩减Root范围" "需加组" "grep -q 'pam_wheel.so' /etc/pam.d/su" "FALSE"
+    add_item "限制编译器权限" "防编译木马" "无" "[ \"\$(stat -c %a /usr/bin/gcc 2>/dev/null)\" == \"700\" ] || [ ! -f /usr/bin/gcc ]" "FALSE"
+    # 21-23: 内核
     add_item "网络内核防欺骗" "防ICMP重定向" "无" "sysctl net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '= 0'" "FALSE"
-    add_item "开启 SYN Cookie" "防御 DDoS" "无" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'" "FALSE"
+    add_item "开启 SYN Cookie" "防御 DDoS 攻击" "无" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'" "FALSE"
     add_item "禁用高危协议" "封堵罕见漏洞" "应用受限" "[ -f /etc/modprobe.d/disable-uncommon.conf ]" "FALSE"
-    
-    # 24-27: 服务审计与更新 (包含 EOL 检测)
-    add_item "时间同步(Chrony)" "审计日志对准" "无" "command -v chronyd >/dev/null" "FALSE"
-    add_item "日志自动轮转(500M)" "防磁盘塞满" "减少历史记录" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf" "FALSE"
+    # 24-27: 审计
+    add_item "时间同步(Chrony)" "审计日志对准" "无" "command -v chronyd >/dev/null || systemctl is-active --quiet systemd-timesyncd" "FALSE"
+    add_item "日志自动轮转(500M)" "防磁盘爆满" "历史减少" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf" "FALSE"
     add_item "Fail2ban 最佳防护" "自动拉黑爆破 IP" "误输也封" "command -v fail2ban-server >/dev/null" "FALSE"
-    add_item "自动更新与漏洞补丁" "系统级漏洞修补" "联网下载耗时" "! is_os_eol && command -v unattended-upgrades >/dev/null && dpkg --compare-versions \$(dpkg-query -f='\${Version}' -W dpkg 2>/dev/null || echo 0) ge 1.20.10" "FALSE"
+    add_item "自动更新与漏洞补丁" "系统补丁修补" "需联网下载" "! is_eol && command -v unattended-upgrades >/dev/null && dpkg --compare-versions \$(dpkg-query -f='\${Version}' -W dpkg 2>/dev/null || echo 0) ge 1.20.10" "FALSE"
 }
 
-# --- 修复逻辑 (绝无省略) ---
 apply_fix() {
     local id=$1; local title="${TITLES[$id]}"
-    echo -e "   ${CYAN}${I_FIX} 加固中: $title ...${RESET}"
+    echo -e "   ${CYAN}${I_FIX} 执行加固: $title ...${RESET}"
     case "$title" in
         "强制 SSH 协议 V2") sed -i '/^Protocol/d' /etc/ssh/sshd_config; echo "Protocol 2" >> /etc/ssh/sshd_config ;;
         "开启公钥认证支持") sed -i '/^PubkeyAuthentication/d' /etc/ssh/sshd_config; echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config ;;
         "禁止 SSH 空密码") sed -i '/^PermitEmptyPasswords/d' /etc/ssh/sshd_config; echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config ;;
         "修改 SSH 默认端口")
             local p_ok=1; while [ $p_ok -ne 0 ]; do
-                read -p "   输入新端口 (回车随机): " i_p; local T_P=${i_p:-$(shuf -i 20000-60000 -n 1)}
-                ss -tuln | grep -q ":$T_P " && ui_warn "端口冲突！" || p_ok=0
-            done; sed -i '/^Port/d' /etc/ssh/sshd_config; echo "Port $T_P" >> /etc/ssh/sshd_config
-            command -v ufw >/dev/null && ufw allow $T_P/tcp >/dev/null ;;
+                echo -ne "${YELLOW}请输入新端口 (20000-60000, 直接回车则随机): ${RESET}"; read -r i_p
+                TARGET_P=${i_p:-$(shuf -i 20000-60000 -n 1)}
+                ss -tuln | grep -q ":$TARGET_P " && ui_warn "端口冲突！" || p_ok=0
+            done; sed -i '/^Port/d' /etc/ssh/sshd_config; echo "Port $TARGET_P" >> /etc/ssh/sshd_config
+            command -v ufw >/dev/null && ufw allow $TARGET_P/tcp >/dev/null ;;
         "禁用 SSH 密码认证") sed -i '/^PasswordAuthentication/d' /etc/ssh/sshd_config; echo "PasswordAuthentication no" >> /etc/ssh/sshd_config ;;
         "SSH 空闲超时(10m)") sed -i '/^ClientAliveInterval/d' /etc/ssh/sshd_config; echo "ClientAliveInterval 600" >> /etc/ssh/sshd_config ;;
         "SSH 登录 Banner") echo "Restricted Access." > /etc/ssh/banner_warn; sed -i '/^Banner/d' /etc/ssh/sshd_config; echo "Banner /etc/ssh/banner_warn" >> /etc/ssh/sshd_config ;;
@@ -143,7 +138,7 @@ apply_fix() {
         "修正 sshd_config") chmod 600 /etc/ssh/sshd_config ;;
         "修正 authorized_keys") [ -f /root/.ssh/authorized_keys ] && chmod 600 /root/.ssh/authorized_keys ;;
         "清理危险 SUID") chmod u-s /bin/mount /bin/umount 2>/dev/null ;;
-        "锁定异常 UID=0") awk -F: '($3 == 0 && $1 != "root"){print $1}' /etc/passwd | xargs -r -I {} passwd -l {} ;;
+        "锁定异常 UID=0") awk -F: '($3 == 0 && $1 != "root"){print $1}' /etc/passwd | xargs -r -I {} passwd -l {} 2>/dev/null ;;
         "移除 Sudoers 免密") sed -i 's/NOPASSWD/PASSWD/g' /etc/sudoers; grep -l "NOPASSWD" /etc/sudoers.d/* 2>/dev/null | xargs -r sed -i 's/^/# /' ;;
         "限制 su 仅 wheel 组") ! grep -q "pam_wheel.so" /etc/pam.d/su && echo "auth required pam_wheel.so use_uid" >> /etc/pam.d/su ;;
         "限制编译器权限") [ -f /usr/bin/gcc ] && chmod 700 /usr/bin/gcc ;;
@@ -161,19 +156,18 @@ enabled = true
 EOF
             systemctl enable --now fail2ban >/dev/null 2>&1; } ;;
         "自动更新与漏洞补丁") 
-            if is_os_eol; then ui_fail "系统版本过老 (EOL)，仓库已停止维护，跳过此项。"; return 1; fi
-            handle_lock && { apt-get update >/dev/null; apt-get install --only-upgrade -y dpkg logrotate apt tar gzip >/dev/null 2>&1 & show_spinner $!; wait $!; } ;;
+            if is_eol; then ui_fail "老系统停止维护，跳过更新。"; else
+            handle_lock && { apt-get update >/dev/null; apt-get install --only-upgrade -y dpkg logrotate apt tar gzip >/dev/null 2>&1 & show_spinner $!; wait $!; }; fi ;;
     esac
 }
 
-# --- 交互界面 ---
+# --- 3. 界面流程 ---
 init_audit
 while true; do
     clear; echo -e "${BLUE}================================================================================${RESET}"
-    echo -e "${BOLD} ID | 状态 | 名称${RESET}"; echo -e "${BLUE}--------------------------------------------------------------------------------${RESET}"
+    echo -e "${BOLD} ID | 状态 | 项目名称${RESET}"; echo -e "${BLUE}--------------------------------------------------------------------------------${RESET}"
     SUM_IDS=""; has_r="FALSE"
     for ((i=1; i<=COUNT; i++)); do
-        # 核心逻辑修正：不再使用转义符号
         [ "${SELECTED[$i]}" == "TRUE" ] && S_ICO="${GREEN}[ ON ]${RESET}" || S_ICO="${GREY}[OFF ]${RESET}"
         [ "${STATUS[$i]}" == "PASS" ] && R_ICO="${GREEN}${I_OK}${RESET}" || R_ICO="${RED}${I_FAIL}${RESET}"
         printf "${GREY}%2d.${RESET} %b %b %-30s\n" "$i" "$S_ICO" "$R_ICO" "${TITLES[$i]}"
@@ -182,17 +176,25 @@ while true; do
         if [ "${SELECTED[$i]}" == "TRUE" ]; then SUM_IDS="${SUM_IDS}${i}, "; [ "${IS_RISKY[$i]}" == "TRUE" ] && has_r="TRUE"; fi
     done
     echo -e "${BLUE}================================================================================${RESET}"
-    echo -e "${I_LIST} 待执行 ID 清单: ${GREEN}${SUM_IDS%, }${RESET}"; echo -e "${BLUE}================================================================================${RESET}"
+    echo -e "${BOLD}${I_LIST} 当前已勾选 ID 清单:${RESET} ${GREEN}${SUM_IDS%, }${RESET}"; echo -e "${BLUE}================================================================================${RESET}"
     [ -n "$MSG" ] && { echo -e "${YELLOW}${I_INFO} $MSG${RESET}"; MSG=""; }
-    echo -ne "指令: a=全选 | r=开始 | q=返回 | 输入 ID 编号翻转: "; read -r ri
-    case "$ri" in
+    echo -ne "指令: a=全选 | r=开始执行 | q=返回 | 输入编号 ID 翻转勾选: "; read -r raw_input
+    
+    # 翻转逻辑修正
+    case "$raw_input" in
         q|Q) exit 0 ;;
         a|A) for ((i=1; i<=COUNT; i++)); do SELECTED[$i]="TRUE"; done ;;
-        r|R) [ -z "$SUM_IDS" ] && continue
-            [ "$has_r" == "TRUE" ] && { read -p "   包含风险项，确认执行? (yes/no): " c; [ "$c" != "yes" ] && continue; }
+        r|R) [ -z "$SUM_IDS" ] && { MSG="请先勾选项目！"; continue; }
+            [ "$has_r" == "TRUE" ] && { echo -ne "${RED}清单含高危项，确认执行? (输入 yes 继续): ${RESET}"; read -r c; [ "$c" != "yes" ] && continue; }
             for ((i=1; i<=COUNT; i++)); do [ "${SELECTED[$i]}" == "TRUE" ] && apply_fix "$i"; done
-            /usr/sbin/sshd -t >/dev/null 2>&1 && { systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; ui_ok "SSH 配置生效成功。"; } || ui_fail "语法检查失败，拦截重载。"
-            echo -ne "\n${YELLOW}加固流程已完成。按任意键返回主控台...${RESET}"; read -n 1 -s -r; exit 0 ;;
-        *) for n in $ri; do [ $n -ge 1 -a $n -le $COUNT ] 2>/dev/null && { [ "${SELECTED[$n]}" == "TRUE" ] && SELECTED[$n]="FALSE" || SELECTED[$n]="TRUE"; }; done ;;
+            /usr/sbin/sshd -t >/dev/null 2>&1 && { systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; ui_ok "配置生效成功。"; } || ui_fail "语法检查错误，已拦截。"
+            # === [核心防御闪退] ===
+            echo -ne "\n${YELLOW}【重要】加固流程已全部执行完毕。按任意键返回主控台菜单...${RESET}"
+            read -n 1 -s -r; exit 0 ;;
+        *) for n in $raw_input; do 
+             if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "$COUNT" ]; then
+                if [ "${SELECTED[$n]}" == "TRUE" ]; then SELECTED[$n]="FALSE"; else SELECTED[$n]="TRUE"; fi
+             fi
+           done ;;
     esac
 done
