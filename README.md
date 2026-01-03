@@ -35,22 +35,17 @@
 请使用具有 **root** 权限的终端执行以下一键安装命令：
 
 ```bash
-# GitHub 官方源 (推荐)
-wget -qO install.sh [https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh](https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh) && chmod +x install.sh && ./install.sh
+# GitHub 官方源 (推荐)：
+wget -qO install.sh https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
 ```
 ```bash
 如果你在访问 GitHub 时遇到困难，可以使用加速镜像：
-wget -qO install.sh [https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh](https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh) && chmod +x install.sh && ./install.sh
+wget -qO install.sh https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
 ```
-
-类别,详细功能说明,对应脚本
-基础优化,TCP BBR加速、智能DNS优化、装机必备软件全家桶,v1.sh
-安全审计,硬件仪表盘、36项深度漏洞扫描、可视化评分报告,v0.sh
-救砖修复,老旧系统换源、包管理器锁自愈、Release文件报错修复,v1.sh
-系统加固,SSH端口修改、禁止Root直接登录、编译器权限锁死,v1.sh
-密钥管理,SSH密钥对自动生成、强制禁用密码登录、权限归一化,v2.sh
-网络防护,ICMP协议禁Ping、内核防欺骗、SYN Flood洪水防御,v3.sh
-
+```bash
+下载后如何使用，请看这里：
+chmod +x install.sh && ./install.sh
+```
 ⚠️ 免责声明
 本工具涉及系统底层配置修改，运行前请务必做好 服务器快照或核心数据备份。
 
