@@ -36,11 +36,11 @@
 
 ### 1. 官方源 (推荐)：
 ```bash
-wget -qO install.sh [https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main/install.sh](https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main/install.sh) && chmod +x install.sh && ./install.sh
+wget -qO install.sh https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
 ```
 #如果你在访问 GitHub 时遇到困难，可以使用加速镜像：
 ```bash
-wget -qO install.sh [https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main/install.sh](https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main/install.sh) && chmod +x install.sh && ./install.sh
+wget -qO install.sh https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
 ```
 ```bash
 #下载后如何使用，请看这里：
