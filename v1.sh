@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v28.0 核弹级无脑执行版)
-# 特性：强制静默安装(不弹窗) | 开局暴力洗地 | 进度条 | 防闪退 | 全量28项
+# v1.sh - Linux 基础安全加固 (v28.0 防卡死·强制超时版)
+# 特性：APT非交互模式 | 修复超时熔断 | 28项全量 | 进度条 | 退出暂停
 
-set -u
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
 
-# --- [信号捕获] ---
-trap 'echo -e "\n${YELLOW}操作取消，返回主菜单...${RESET}"; sleep 1; exit 0' INT
+# =======================================================================
+# [核心防闪退] 脚本退出前强制暂停
+# =======================================================================
+finish_trap() {
+    echo -e "\n\033[33m[系统提示] 脚本运行结束。请按回车键关闭窗口...\033[0m"
+    read -r
+}
+trap finish_trap EXIT
+# =======================================================================
 
 # --- [UI 自适应] ---
-[ "${USE_EMOJI:-}" == "" ] && { [[ "${LANG:-}" =~ "UTF-8" ]] && USE_EMOJI="1" || USE_EMOJI="0"; }
+if [ "${USE_EMOJI:-}" == "" ]; then
+    [[ "${LANG:-}" =~ "UTF-8" ]] || [[ "${LANG:-}" =~ "utf8" ]] && USE_EMOJI="1" || USE_EMOJI="0"
+fi
+
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m'); 
 CYAN=$(printf '\033[36m'); GREY=$(printf '\033[90m'); RESET=$(printf '\033[0m'); BOLD=$(printf '\033[1m')
-I_OK=$([ "$USE_EMOJI" == "1" ] && echo "✅" || echo "[ OK ]"); I_FAIL=$([ "$USE_EMOJI" == "1" ] && echo "❌" || echo "[FAIL]")
-I_INFO=$([ "$USE_EMOJI" == "1" ] && echo "ℹ️ " || echo "[INFO]"); I_WAIT=$([ "$USE_EMOJI" == "1" ] && echo "⏳" || echo "[WAIT]")
 
-# --- 核心工具 ---
+if [ "$USE_EMOJI" == "1" ]; then
+    I_OK="✅"; I_FAIL="❌"; I_INFO="ℹ️ "; I_FIX="🔧"; I_WAIT="⏳"; I_LIST="📝"
+else
+    I_OK="[ OK ]"; I_FAIL="[FAIL]"; I_INFO="[INFO]"; I_FIX="[FIX]"; I_WAIT="[WAIT]"; I_LIST="[LIST]"
+fi
+
+# --- 辅助函数 ---
 ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
 ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
 ui_warn() { echo -e "${YELLOW}[!] $*${RESET}"; }
 ui_fail() { echo -e "${RED}${I_FAIL} $*${RESET}"; }
 
+# 进度条 (使用 kill -0 检测)
 show_spinner() {
     local pid=$1
     local delay=0.1
@@ -37,66 +51,110 @@ show_spinner() {
     printf "    \b\b\b\b"
 }
 
-# --- [核弹级] 系统环境暴力清洗 ---
-# 不问询，直接杀进程、删锁、修库
-force_heal_environment() {
-    ui_info "正在执行环境暴力清洗 (杀进程/删锁/修库)..."
-    
-    # 1. 杀掉所有占用锁的进程
-    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-        fuser -k -9 /var/lib/dpkg/lock-frontend >/dev/null 2>&1
+# 磁盘检查
+check_space() { 
+    local free_kb=$(df / | awk 'NR==2 {print $4}')
+    if [ "$free_kb" -lt 204800 ]; then 
+        ui_fail "磁盘空间不足 200MB，停止操作。"
+        return 1
     fi
-    if fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
-        fuser -k -9 /var/lib/dpkg/lock >/dev/null 2>&1
+    return 0
+}
+
+# 锁管理 (带超时)
+handle_lock() {
+    local lock="/var/lib/dpkg/lock-frontend"
+    [ ! -f "$lock" ] || ! fuser "$lock" >/dev/null 2>&1 && return 0
+    
+    ui_warn "检测到更新锁。等待 5 秒..."
+    local count=0; while fuser "$lock" >/dev/null 2>&1 && [ $count -lt 5 ]; do sleep 1; count=$((count+1)); done
+    
+    if fuser "$lock" >/dev/null 2>&1; then
+        local pid=$(fuser "$lock" 2>/dev/null | awk '{print $NF}')
+        echo -e "${YELLOW}锁未释放。请选: [1] 继续等 [2] 跳过 [3] 强制解锁(PID:$pid)${RESET}"
+        read -p "选择: " c
+        if [ "$c" == "3" ]; then
+            [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+            rm -f "$lock" /var/lib/apt/lists/lock /var/lib/dpkg/lock 2>/dev/null
+            return 0
+        elif [ "$c" == "1" ]; then
+            handle_lock
+        else
+            return 1
+        fi
     fi
+    return 0
+}
+
+# 全局环境预检与修复 (核心防卡死逻辑)
+run_global_heal() {
+    ui_info "正在执行全局环境预检与修复..."
     
-    # 2. 强制删除锁文件
-    rm -f /var/lib/dpkg/lock \
-          /var/lib/dpkg/lock-frontend \
-          /var/lib/apt/lists/lock \
-          /var/cache/apt/archives/lock 2>/dev/null
-    
-    # 3. 修正 Debian 11 源 (防止 update 404)
+    # 1. 先修正 Debian 11 源 (防止 update 卡死或报错)
     if [ -f /etc/debian_version ] && grep -q "^11" /etc/debian_version; then
         if grep -q "bullseye/updates" /etc/apt/sources.list 2>/dev/null; then
+            ui_info "修正 Debian 11 安全源..."
             sed -i 's|bullseye/updates|bullseye-security|g' /etc/apt/sources.list
         fi
     fi
 
-    # 4. 强制修复 dpkg 状态
-    # 使用 dpkg --configure -a 修复中断的安装
-    dpkg --configure -a >/dev/null 2>&1
-    # 再次尝试修复依赖
+    # 2. 只有在 apt 系统下才执行 dpkg 修复
     if command -v apt-get >/dev/null; then
-        apt-get install -f -y >/dev/null 2>&1
+        handle_lock
+        
+        # 强制非交互配置参数
+        local APT_OPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+        
+        # 使用 timeout 防止卡死 (限时 180秒)
+        if dpkg --audit >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+            ui_info "检测到包管理异常，正在尝试自愈 (限时 3分钟)..."
+            
+            # 后台运行修复
+            (
+                timeout 180s dpkg --configure -a $APT_OPTS
+                timeout 180s apt-get install -f $APT_OPTS
+            ) >/dev/null 2>&1 &
+            
+            local pid=$!
+            show_spinner "$pid"
+            wait "$pid"
+            
+            if [ $? -eq 124 ]; then
+                ui_fail "修复超时！可能系统底层损坏，脚本尝试跳过继续运行。"
+            else
+                ui_ok "环境预检完成。"
+            fi
+        fi
     fi
-    
-    ui_ok "环境清洗完成。"
 }
 
-# 智能安装 (带强制参数，绝不卡死)
+# 智能安装
 smart_install() {
     local pkg=$1
     if command -v "$pkg" >/dev/null 2>&1 || [ -x "/usr/sbin/$pkg" ] || [ -x "/usr/bin/$pkg" ]; then return 0; fi
     
-    ui_info "安装: $pkg ..."
+    handle_lock || return 1
+    ui_info "安装组件: $pkg ..."
     local log="/tmp/${pkg}_err.log"
+    local APT_OPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
     
-    # 关键：加入 -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
-    # 这会让 apt 遇到配置文件冲突时自动使用旧配置，不再弹窗询问！
     if command -v apt-get >/dev/null; then
-        apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" "$pkg" >/dev/null 2>"$log" &
+        timeout 300s apt-get install $APT_OPTS "$pkg" >/dev/null 2>"$log" &
     elif command -v dnf >/dev/null; then
-        dnf install -y "$pkg" >/dev/null 2>"$log" &
+        timeout 300s dnf install -y "$pkg" >/dev/null 2>"$log" &
     elif command -v yum >/dev/null; then
-        yum install -y "$pkg" >/dev/null 2>"$log" &
+        timeout 300s yum install -y "$pkg" >/dev/null 2>"$log" &
     else return 1; fi
     
     local pid=$!
     show_spinner "$pid"
     wait "$pid"
+    local res=$?
     
-    if [ $? -ne 0 ]; then
+    if [ $res -eq 124 ]; then
+        ui_fail "$pkg 安装超时(5分钟)。"
+        return 1
+    elif [ $res -ne 0 ]; then
         ui_fail "$pkg 安装失败。日志:"
         [ -f "$log" ] && cat "$log"
         rm -f "$log"
@@ -129,7 +187,6 @@ is_eol() {
 }
 
 init_audit() {
-    # 1-8 SSH
     add_item "强制 SSH 协议 V2" "修复旧版漏洞" "无" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
     add_item "开启公钥认证支持" "允许密钥登录" "无" "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止 SSH 空密码" "防止远程直连" "无" "grep -q '^PermitEmptyPasswords no' /etc/ssh/sshd_config" "FALSE"
@@ -138,32 +195,31 @@ init_audit() {
     add_item "SSH 空闲超时(10m)" "防范劫持" "自动断连" "grep -q '^ClientAliveInterval 600' /etc/ssh/sshd_config" "FALSE"
     add_item "SSH 登录 Banner" "合规警告" "无" "grep -q '^Banner' /etc/ssh/sshd_config" "FALSE"
     add_item "禁止环境篡改" "防Shell提权" "无" "grep -q '^PermitUserEnvironment no' /etc/ssh/sshd_config" "FALSE"
-    # 9-11 账户
+    
     add_item "强制 10 位混合密码" "极大提高门槛" "需改密" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null || grep -q 'minlen=10' /etc/pam.d/system-auth 2>/dev/null" "FALSE"
     add_item "密码修改最小间隔" "防盗号改密" "7天禁再改" "grep -q 'PASS_MIN_DAYS[[:space:]]*7' /etc/login.defs" "FALSE"
     add_item "Shell 自动注销(10m)" "离机安全" "强制退出" "grep -q 'TMOUT=600' /etc/profile" "FALSE"
-    # 12-16 权限
+    
     add_item "修正 /etc/passwd" "防非法修改" "无" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]" "FALSE"
     add_item "修正 /etc/shadow" "防泄露哈希" "无" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]" "FALSE"
     add_item "修正 sshd_config" "保护SSH配置" "无" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]" "FALSE"
     add_item "修正 authorized_keys" "保护公钥" "无" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]" "FALSE"
     add_item "清理危险 SUID" "堵死提权" "无法ping" "[ ! -u /bin/mount ]" "FALSE"
-    # 17-20 限制
+    
     add_item "锁定异常 UID=0" "清后门账号" "误锁管理" "[ -z \"\$(awk -F: '(\$3 == 0 && \$1 != \"root\"){print \$1}' /etc/passwd)\" ]" "TRUE"
     add_item "移除 Sudo 免密" "防静默提权" "脚本适配" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1" "TRUE"
     add_item "限制 su 仅 wheel" "缩减Root范围" "需加组" "grep -q 'pam_wheel.so' /etc/pam.d/su || grep -q 'pam_wheel.so' /etc/pam.d/system-auth" "FALSE"
     add_item "限制编译器权限" "防编译木马" "无" "[ \"\$(stat -c %a /usr/bin/gcc 2>/dev/null)\" == \"700\" ] || [ ! -f /usr/bin/gcc ]" "FALSE"
-    # 21-23 内核
+    
     add_item "网络内核防欺骗" "防ICMP重定向" "无" "sysctl net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '= 0'" "FALSE"
     add_item "开启 SYN Cookie" "防DDoS" "无" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'" "FALSE"
     add_item "禁用高危协议" "封堵漏洞" "应用受限" "[ -f /etc/modprobe.d/disable-uncommon.conf ]" "FALSE"
-    # 24-28 审计与更新
+    
     add_item "时间同步(Chrony)" "日志对准" "无" "command -v chronyd >/dev/null || systemctl is-active --quiet systemd-timesyncd" "FALSE"
     add_item "日志自动轮转(500M)" "防磁盘爆满" "减少记录" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf" "FALSE"
     add_item "Fail2ban 最佳防护" "自动封禁IP" "误输也封" "command -v fail2ban-server >/dev/null" "FALSE"
     add_item "每日自动更新组件" "自动打补丁" "版本微变" "command -v unattended-upgrades >/dev/null || systemctl is-active --quiet dnf-automatic.timer" "FALSE"
-    # 注意：这里的检测逻辑改为了只要 apt/dnf 能运行就算通过，避免因 dpkg 锁导致检测误判为叉
-    add_item "立即修复高危漏洞" "升级dpkg等" "需联网" "! is_eol && { command -v apt-get >/dev/null || command -v dnf >/dev/null; }" "FALSE"
+    add_item "立即修复高危漏洞" "升级dpkg等" "需联网" "! is_eol && { dpkg --compare-versions \$(dpkg-query -f='\${Version}' -W dpkg 2>/dev/null || echo 0) ge 1.20.10; }" "FALSE"
 }
 
 # --- 修复逻辑 ---
@@ -195,7 +251,7 @@ apply_fix() {
         "修正 authorized_keys") [ -f /root/.ssh/authorized_keys ] && chmod 600 /root/.ssh/authorized_keys ;;
         "清理危险 SUID") chmod u-s /bin/mount /bin/umount /usr/bin/newgrp /usr/bin/chsh 2>/dev/null ;;
         "锁定异常 UID=0") awk -F: '($3 == 0 && $1 != "root"){print $1}' /etc/passwd | xargs -r -I {} passwd -l {} ;;
-        "移除 Sudo 免密") sed -i 's/NOPASSWD/PASSWD/g' /etc/sudoers 2>/dev/null; grep -l "NOPASSWD" /etc/sudoers.d/* 2>/dev/null | xargs -r sed -i 's/^/# /' ;;
+        "移除 Sudo 免密") sed -i 's/NOPASSWD/PASSWD/g' /etc/sudoers; grep -l "NOPASSWD" /etc/sudoers.d/* 2>/dev/null | xargs -r sed -i 's/^/# /' ;;
         "限制 su 仅 wheel") ! grep -q "pam_wheel.so" /etc/pam.d/su && echo "auth required pam_wheel.so use_uid" >> /etc/pam.d/su ;;
         "限制编译器权限") [ -f /usr/bin/gcc ] && chmod 700 /usr/bin/gcc ;;
         "网络内核防欺骗") echo "net.ipv4.conf.all.accept_redirects = 0" > /etc/sysctl.d/99-sec.conf; sysctl --system >/dev/null 2>&1 ;;
@@ -218,16 +274,17 @@ EOF
              systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 ;;
         "立即修复高危漏洞")
              if is_eol; then ui_fail "系统过老已停更，跳过。"; else
-                 ui_info "正在全量下载补丁 (静默模式，防止卡死)..."
+                 handle_lock
+                 ui_info "正在下载补丁 (限时300秒，请稍候)..."
+                 local APT_OPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
                  if command -v apt-get >/dev/null; then
-                     apt-get update >/dev/null 2>&1
-                     # 关键：加上 -y 和 强制配置选项，防止弹出对话框卡死脚本
-                     apt-get install --only-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dpkg logrotate apt tar gzip openssl >/dev/null 2>&1 &
+                     timeout 300s apt-get update >/dev/null 2>&1
+                     timeout 300s apt-get install --only-upgrade $APT_OPTS dpkg logrotate apt tar gzip openssl >/dev/null 2>&1 &
                  elif command -v dnf >/dev/null; then
-                     dnf update -y dpkg logrotate >/dev/null 2>&1 &
+                     timeout 300s dnf update -y dpkg logrotate >/dev/null 2>&1 &
                  fi
                  show_spinner $!; wait $!
-                 ui_ok "补丁修复流程结束。"
+                 [ $? -eq 124 ] && ui_fail "补丁下载超时！" || ui_ok "漏洞修复流程结束。"
              fi ;;
     esac
 }
@@ -262,12 +319,13 @@ while true; do
         r|R) [ -z "$SUM_IDS" ] && { MSG="请先勾选！"; continue; }
             if [ "$has_r" == "TRUE" ]; then echo -ne "${RED}含风险项，确认继续? (yes/no): ${RESET}"; read -r c; [ "$c" != "yes" ] && continue; fi
             
-            # --- 核心：开局暴力洗地，不问询 ---
-            force_heal_environment
-            # ----------------------------------
+            # --- 核心：只在此处运行一次自愈，防卡死 ---
+            check_space || continue
+            run_global_heal
+            # ----------------------------------------
             
             for ((i=1; i<=COUNT; i++)); do [ "${SELECTED[$i]}" == "TRUE" ] && apply_fix "$i"; done
-            /usr/sbin/sshd -t >/dev/null 2>&1 && { systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; ui_ok "SSH 已重载。"; }
+            /usr/sbin/sshd -t >/dev/null 2>&1 && { systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; ui_ok "SSH 已重载。"; } || ui_fail "SSH语法错误，拦截重载。"
             
             echo -ne "\n${YELLOW}【重要】所有流程执行完毕。按任意键返回主控台菜单...${RESET}"; read -n 1 -s -r; exit 0 ;;
         *) for n in $ri; do 
