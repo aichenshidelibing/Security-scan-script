@@ -33,7 +33,8 @@
 ## 🚀 快速开始
 
 请使用具有 **root** 权限的终端执行以下一键安装命令：
-### 1. 官方源 (推荐)
+
+### 1. 官方源 (推荐)：
 ```bash
 wget -qO install.sh [https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main/install.sh](https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main/install.sh) && chmod +x install.sh && ./install.sh
 ```
