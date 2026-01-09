@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v37.0 双引擎·全境优化终极版)
-# 特性：中/外双向DNS优化 | 鹰眼防火墙检测 | 云毒瘤清理 | 39项全量
+# v1.sh - Linux 基础安全加固 (v38.0 鹰眼显形·双引擎实装版)
+# 特性：顶部状态栏显形 | 双引擎DNS | 毒瘤清理 | 39项全量
 
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
@@ -47,41 +47,43 @@ show_spinner() {
 
 check_space() { [ $(df / | awk 'NR==2 {print $4}') -lt 204800 ] && { ui_fail "磁盘不足 200MB，停止。"; return 1; }; return 0; }
 
-# --- [鹰眼] 网络态势感知 ---
-network_insight() {
-    echo -e "${BLUE}================================================================================${RESET}"
-    echo -ne "${BOLD}正在进行网络与防火墙态势感知...${RESET}"
+# --- [修正] 鹰眼网络侦测 (启动时预加载) ---
+NET_BANNER=""
+init_network_insight() {
+    echo -ne "${CYAN}${I_WAIT} 正在进行网络与防火墙态势感知 (约需 3 秒)...${RESET}"
     
-    # 1. 内部防火墙
-    local fw_status="${GREEN}未运行${RESET}"
+    # 1. 内部防火墙状态
+    local fw_status="${GREEN}已关闭 (推荐)${RESET}"
     if command -v ufw >/dev/null && ufw status | grep -q "active"; then fw_status="${YELLOW}UFW 运行中${RESET}"; fi
     if command -v firewall-cmd >/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then fw_status="${YELLOW}Firewalld 运行中${RESET}"; fi
     if [ $(iptables -L INPUT | wc -l) -gt 10 ]; then fw_status="${YELLOW}Iptables 活跃${RESET}"; fi
 
-    # 2. 出站连通性 (随机采样)
+    # 2. 出站连通性检测
     local net_status=""
     # ICMP
     if ping -c 1 -W 1 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then 
-        net_status="${GREEN}ICMP(通)${RESET}"
+        net_status="${GREEN}ICMP${RESET}"
     else 
-        net_status="${RED}ICMP(断)${RESET}"
+        net_status="${RED}ICMP(阻断)${RESET}"
     fi
     # TCP (Web)
     if curl -s --connect-timeout 2 https://www.baidu.com >/dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com >/dev/null 2>&1; then
-        net_status="$net_status | ${GREEN}TCP(通)${RESET}"
+        net_status="$net_status | ${GREEN}TCP${RESET}"
     else
-        net_status="$net_status | ${RED}TCP(断)${RESET}"
+        net_status="$net_status | ${RED}TCP(阻断)${RESET}"
     fi
-    # UDP (DNS 53)
+    # UDP (DNS)
     if timeout 2 nslookup google.com 8.8.8.8 >/dev/null 2>&1 || timeout 2 nslookup baidu.com 223.5.5.5 >/dev/null 2>&1; then
-        net_status="$net_status | ${GREEN}UDP(通)${RESET}"
+        net_status="$net_status | ${GREEN}UDP${RESET}"
     else
-        net_status="$net_status | ${RED}UDP(断)${RESET}"
+        net_status="$net_status | ${RED}UDP(阻断)${RESET}"
     fi
 
-    echo -e "\r${I_WALL} 内部防火墙: [ $fw_status ]   ${I_NET} 网络连通性: [ $net_status ]"
-    echo -e "${GREY}(提示: 若网络不通，请优先检查云厂商控制台的安全组设置)${RESET}"
-    echo -e "${BLUE}================================================================================${RESET}"
+    # 3. 生成 Banner 缓存
+    NET_BANNER="${BLUE}================================================================================${RESET}\n"
+    NET_BANNER+="${I_WALL} 内部防火墙: [ $fw_status ]   ${I_NET} 出站连通性: [ $net_status ]\n"
+    NET_BANNER+="${GREY}   (提示: 若连通性全红，请检查云厂商控制台的安全组规则)${RESET}"
+    echo -e "\r                                                               \r" # 清除提示行
 }
 
 # --- 智能锁管理 ---
@@ -126,9 +128,9 @@ fix_eol_sources() {
     fi
 }
 
-# --- [修正] 双引擎地域感知 DNS 修复 ---
+# --- [确立] 双引擎地域感知 DNS 修复 ---
 smart_dns_fix() {
-    ui_info "正在进行地域与 DNS 深度审计..."
+    ui_info "正在启动双引擎 DNS 优化 (Engine: CN/Global)..."
     
     # 1. 获取位置 (Cloudflare 优先)
     local loc=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace | grep "loc=" | cut -d= -f2)
@@ -139,7 +141,7 @@ smart_dns_fix() {
         local global_ping=$(ping -c 1 -W 1 8.8.8.8 | grep time= | cut -d= -f4 | cut -d. -f1); [ -z "$global_ping" ] && global_ping=999
         if [ "$cn_ping" -lt "$global_ping" ]; then loc="CN"; else loc="US"; fi
     fi
-    ui_info "识别到服务器物理位置: ${loc:-Unknown}"
+    ui_info "目标服务器物理位置: ${loc:-Unknown}"
 
     # 3. 检查当前 DNS 成分
     local current_dns=$(cat /etc/resolv.conf)
@@ -148,19 +150,19 @@ smart_dns_fix() {
 
     # 4. 执行双向修正
     if [ "$loc" == "CN" ]; then
-        # === [国内逻辑] 绝不含糊，必须用国内DNS ===
+        # === [国内引擎] 强制使用阿里云/腾讯云 ===
         if [ "$has_cn_dns" -eq 0 ] || [ "$has_global_dns" -eq 1 ]; then
-             ui_warn "国内机器配置不当 (使用了国外DNS或为空)，正在强制优化..."
+             ui_warn "检测到国内机器使用了非优化 DNS，正在切换至国内引擎..."
              echo "nameserver 223.5.5.5" > /etc/resolv.conf
              echo "nameserver 119.29.29.29" >> /etc/resolv.conf
-             ui_ok "DNS 已修正为国内标准 (阿里云/腾讯云)。"
+             ui_ok "DNS 已修正为国内标准 (Ali/Tencent)。"
         else
              ui_ok "DNS 配置符合中国地域标准。"
         fi
     else
-        # === [国外逻辑] 绝不含糊，必须用国际DNS ===
+        # === [全球引擎] 强制使用 CF/Google ===
         if [ "$has_cn_dns" -eq 1 ]; then
-            ui_warn "检测到海外机器混用了中国 DNS (导致连接被阻断)，正在强制修正..."
+            ui_warn "检测到海外机器混用了中国 DNS (严重错误)，正在切换至全球引擎..."
             echo "nameserver 1.1.1.1" > /etc/resolv.conf
             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
             ui_ok "DNS 已修正为国际标准 (Cloudflare/Google)。"
@@ -188,19 +190,18 @@ clean_cloud_quirks() {
 
 # --- 全局自愈 ---
 heal_environment() {
-    network_insight
-    ui_info "正在初始化环境..."
+    ui_info "正在执行环境自愈流程..."
     clean_cloud_quirks
     handle_lock
     fix_eol_sources
-    smart_dns_fix # 换源后立即修DNS，确保update能通
+    smart_dns_fix # 换源后立即修DNS
     
     if command -v apt-get >/dev/null; then
         ( UCF_FORCE_CONFFOLD=1 dpkg --configure -a && apt-get install -f -y ) >/dev/null 2>&1
     elif command -v yum >/dev/null; then
         yum install -y epel-release >/dev/null 2>&1
     fi
-    ui_ok "环境自愈完成。"
+    ui_ok "环境准备就绪。"
 }
 
 # --- 批量安装 ---
@@ -221,7 +222,7 @@ smart_install() {
     rm -f "$log"; return 0
 }
 
-# --- 数据定义 (39项) ---
+# --- 数据定义 (39项全量) ---
 declare -a TITLES PROS RISKS STATUS SELECTED IS_RISKY
 COUNT=0; MSG=""
 CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | tail -n 1); CUR_P=${CUR_P:-22}
@@ -242,7 +243,8 @@ init_audit() {
     add_item "IPv4 优先策略" "解决IPv6超时卡顿" "IPv6可能变慢" "grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf" "FALSE"
     add_item "智能 Swap 分区" "防止内存溢出死机" "占用少量磁盘" "check_swap" "FALSE"
     add_item "安装装机必备软件" "curl/vim/htop/git" "占用空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
-    add_item "智能 DNS 优化" "地域感知/反劫持" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
+    # [修改点] 名称显式改为 双引擎
+    add_item "双引擎 DNS 优化" "地域感知/反劫持" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
 
     # 2. SSH 安全
     add_item "强制 SSH 协议 V2" "修复旧版漏洞" "无" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
@@ -308,7 +310,8 @@ apply_fix() {
                 dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none; chmod 600 /swapfile; mkswap /swapfile; swapon /swapfile; echo "/swapfile none swap sw 0 0" >> /etc/fstab; ui_ok "1GB Swap 已创建。"
             fi ;;
         "安装装机必备软件") smart_install "curl wget vim unzip htop git net-tools" ;;
-        "智能 DNS 优化") smart_dns_fix ;;
+        "双引擎 DNS 优化") smart_dns_fix ;;
+        # ... (常规加固保持不变，代码量精简显示，但实际执行全量) ...
         "强制 SSH 协议 V2") sed -i '/^Protocol/d' /etc/ssh/sshd_config; echo "Protocol 2" >> /etc/ssh/sshd_config ;;
         "开启公钥认证支持") sed -i '/^PubkeyAuthentication/d' /etc/ssh/sshd_config; echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config ;;
         "禁止 SSH 空密码") sed -i '/^PermitEmptyPasswords/d' /etc/ssh/sshd_config; echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config ;;
@@ -372,10 +375,17 @@ EOF
     esac
 }
 
-# --- 交互界面 ---
+# --- 核心逻辑调整：启动即侦测 ---
+# 1. 先做网络侦测，并缓存结果
+init_network_insight
+# 2. 只有第一次需要显示 banner，后续 loop 里直接 echo 变量
 init_audit
+
 while true; do
     clear
+    # [关键] 顶部固定显示状态栏
+    echo -e "$NET_BANNER"
+    
     echo "${BLUE}================================================================================${RESET}"
     echo "${BOLD} ID | 状态 | 名称${RESET}"
     echo "${BLUE}--------------------------------------------------------------------------------${RESET}"
@@ -386,6 +396,7 @@ while true; do
         printf "${GREY}%2d.${RESET} %b %b %-30s\n" "$i" "$S_ICO" "$R_ICO" "${TITLES[$i]}"
         if [ "${SELECTED[$i]}" == "TRUE" ]; then SUM_IDS="${SUM_IDS}${i}, "; [ "${IS_RISKY[$i]}" == "TRUE" ] && has_r="TRUE"; fi
     done
+    
     echo "${BLUE}================================================================================${RESET}"
     echo -e "${I_LIST} 待执行清单: ${GREEN}${SUM_IDS%, }${RESET}"
     [ -n "$MSG" ] && { echo -e "${YELLOW}${I_INFO} $MSG${RESET}"; MSG=""; }
