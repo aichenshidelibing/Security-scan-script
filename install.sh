@@ -137,7 +137,7 @@ main_menu() {
         printf " [0] %-30s [状态: %s]\n" "全维审计 (v0.sh)" "$(st v0.sh)"
         echo -e "     ${GREY}└─ 只查不改 / 硬件仪表盘 / 36项深度体检 / 评分报告${RESET}"
         printf " [1] %-30s [状态: %s]\n" "全能管家 (v1.sh)" "$(st v1.sh)"
-        echo -e "     ${GREY}└─ BBR加速 / 救砖换源 / 批量安装 / 36项加固 / 补丁修复${RESET}"
+        echo -e "     ${GREY}└─ BBR加速 / 救砖换源 / 批量安装 / 39项加固 / 补丁修复${RESET}"
         printf " [2] %-30s [状态: %s]\n" "密钥配置 (v2.sh)" "$(st v2.sh)"
         echo -e "     ${GREY}└─ 禁用密码登录 / 自动生成密钥对 / 权限自动修正${RESET}"
         printf " [3] %-30s [状态: %s]\n" "网络隐身 (v3.sh)" "$(st v3.sh)"
