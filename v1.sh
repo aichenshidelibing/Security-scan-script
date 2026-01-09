@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v40.0)
+# v1.sh - Linux 基础安全加固 (v41.0)
+
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
 export UCF_FORCE_CONFFOLD=1
@@ -8,15 +9,16 @@ export UCF_FORCE_CONFFOLD=1
 # =======================================================================
 # [核心交互修复] 信号管理
 # =======================================================================
-# 1. 定义退出时的暂停逻辑 (仅在非正常退出时兜底)
+# 1. 正常退出时的逻辑 (当脚本自然结束时)
 finish_trap() {
-    echo -e "\n\033[33m[系统提示] 脚本运行结束。请按回车键关闭窗口...\033[0m"
+    echo -e "\n\033[33m[系统提示] 脚本执行结束。按回车键继续...\033[0m"
     read -r
 }
 # 默认开启 EXIT 陷阱
 trap finish_trap EXIT
 
-# 2. [关键修复] 捕获 Ctrl+C (INT)，立即解除暂停并退出，实现秒回主菜单
+# 2. [关键修复] 捕获 Ctrl+C (INT)
+# 立即解除 EXIT 陷阱，防止二次暂停，直接退出当前脚本返回 install.sh
 trap 'trap - EXIT; echo -e "\n\033[33m[用户强制终止] 正在返回主菜单...\033[0m"; exit 0' INT
 # =======================================================================
 
@@ -127,7 +129,7 @@ fix_eol_sources() {
     fi
 }
 
-# --- 双引擎地域感知 DNS ---
+# --- 双引擎 DNS ---
 smart_dns_fix() {
     ui_info "正在启动双引擎 DNS 优化 (Engine: CN/Global)..."
     local loc=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace | grep "loc=" | cut -d= -f2)
@@ -136,8 +138,6 @@ smart_dns_fix() {
         local global_ping=$(ping -c 1 -W 1 8.8.8.8 | grep time= | cut -d= -f4 | cut -d. -f1); [ -z "$global_ping" ] && global_ping=999
         if [ "$cn_ping" -lt "$global_ping" ]; then loc="CN"; else loc="US"; fi
     fi
-    ui_info "目标服务器物理位置: ${loc:-Unknown}"
-
     local current_dns=$(cat /etc/resolv.conf)
     local has_cn_dns=0; echo "$current_dns" | grep -qE "223\.5\.5\.5|119\.29\.29\.29|114\.114\.114\.114|180\.76\.76\.76" && has_cn_dns=1
     local has_global_dns=0; echo "$current_dns" | grep -qE "8\.8\.8\.8|1\.1\.1\.1" && has_global_dns=1
@@ -145,25 +145,15 @@ smart_dns_fix() {
     if [ "$loc" == "CN" ]; then
         if [ "$has_cn_dns" -eq 0 ] || [ "$has_global_dns" -eq 1 ]; then
              ui_warn "检测到国内机器使用非优化DNS，切换至国内引擎..."
-             echo "nameserver 223.5.5.5" > /etc/resolv.conf
-             echo "nameserver 119.29.29.29" >> /etc/resolv.conf
-             ui_ok "DNS 已修正为国内标准 (Ali/Tencent)。"
-        else
-             ui_ok "DNS 配置符合中国地域标准。"
-        fi
+             echo "nameserver 223.5.5.5" > /etc/resolv.conf; echo "nameserver 119.29.29.29" >> /etc/resolv.conf; ui_ok "DNS 已修正 (Ali/Tencent)。"
+        else ui_ok "DNS 配置符合中国地域标准。"; fi
     else
         if [ "$has_cn_dns" -eq 1 ]; then
-            ui_warn "检测到海外机器混用中国DNS (严重错误)，切换至全球引擎..."
-            echo "nameserver 1.1.1.1" > /etc/resolv.conf
-            echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-            ui_ok "DNS 已修正为国际标准 (Cloudflare/Google)。"
+            ui_warn "检测到海外机器混用中国DNS，切换至全球引擎..."
+            echo "nameserver 1.1.1.1" > /etc/resolv.conf; echo "nameserver 8.8.8.8" >> /etc/resolv.conf; ui_ok "DNS 已修正 (CF/Google)。"
         elif [ "$has_global_dns" -eq 0 ]; then
-             echo "nameserver 1.1.1.1" > /etc/resolv.conf
-             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-             ui_ok "DNS 已初始化为国际标准。"
-        else
-             ui_ok "DNS 配置符合海外地域标准。"
-        fi
+             echo "nameserver 1.1.1.1" > /etc/resolv.conf; echo "nameserver 8.8.8.8" >> /etc/resolv.conf; ui_ok "DNS 已初始化。"
+        else ui_ok "DNS 配置符合海外地域标准。"; fi
     fi
 }
 
@@ -186,11 +176,7 @@ heal_environment() {
     handle_lock
     fix_eol_sources
     smart_dns_fix
-    if command -v apt-get >/dev/null; then
-        ( UCF_FORCE_CONFFOLD=1 dpkg --configure -a && apt-get install -f -y ) >/dev/null 2>&1
-    elif command -v yum >/dev/null; then
-        yum install -y epel-release >/dev/null 2>&1
-    fi
+    if command -v apt-get >/dev/null; then ( UCF_FORCE_CONFFOLD=1 dpkg --configure -a && apt-get install -f -y ) >/dev/null 2>&1; elif command -v yum >/dev/null; then yum install -y epel-release >/dev/null 2>&1; fi
     ui_ok "环境准备就绪。"
 }
 
@@ -217,7 +203,6 @@ declare -a TITLES PROS RISKS STATUS SELECTED IS_RISKY
 COUNT=0; MSG=""
 CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | tail -n 1); CUR_P=${CUR_P:-22}
 
-# [修改] 增加 Pros 和 Risks 参数并保存
 add_item() {
     COUNT=$((COUNT+1))
     TITLES[$COUNT]="$1"; PROS[$COUNT]="$2"; RISKS[$COUNT]="$3"; IS_RISKY[$COUNT]="$5"
@@ -227,59 +212,60 @@ add_item() {
 
 is_eol() { if [ -f /etc/os-release ]; then . /etc/os-release; [[ "$ID" == "debian" && "$VERSION_ID" -lt 10 ]] && return 0; [[ "$ID" == "ubuntu" && "${VERSION_ID%%.*}" -lt 16 ]] && return 0; [[ "$ID" == "centos" && "$VERSION_ID" -lt 7 ]] && return 0; fi; return 1; }
 
+# === [关键补全] 所有项目的优点和风险描述全部填满，无省略 ===
 init_audit() {
     # 1. 基础优化
-    add_item "开启 TCP BBR 加速" "大幅提升网络吞吐" "需内核支持" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr" "FALSE"
-    add_item "系统资源限制优化" "提升高并发处理能力" "无" "grep -q 'soft nofile 65535' /etc/security/limits.conf" "FALSE"
-    add_item "IPv4 优先策略" "解决IPv6连接卡顿" "IPv6流量减少" "grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf" "FALSE"
-    add_item "智能 Swap 分区" "防止内存溢出死机" "占用少量磁盘" "check_swap" "FALSE"
-    add_item "安装装机必备软件" "预装 curl/vim/htop" "占用少量空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
-    add_item "双引擎 DNS 优化" "地域感知/防劫持" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
+    add_item "开启 TCP BBR 加速" "大幅提升网络吞吐量" "需内核支持 (>=4.9)" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr" "FALSE"
+    add_item "系统资源限制优化" "提升系统高并发处理能力" "无" "grep -q 'soft nofile 65535' /etc/security/limits.conf" "FALSE"
+    add_item "IPv4 优先策略" "解决 IPv6 连接卡顿超时" "IPv6 流量可能减少" "grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf" "FALSE"
+    add_item "智能 Swap 分区" "防止内存溢出导致死机" "占用约 1GB 磁盘空间" "check_swap" "FALSE"
+    add_item "安装装机必备软件" "预装 curl/vim/htop/git" "占用少量磁盘空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
+    add_item "双引擎 DNS 优化" "地域感知加速与防劫持" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
 
     # 2. SSH 安全
-    add_item "强制 SSH 协议 V2" "修复旧版严重漏洞" "不支持古董客户端" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
-    add_item "开启公钥认证支持" "允许密钥登录" "无" "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config" "FALSE"
-    add_item "禁止 SSH 空密码" "防止远程直接入侵" "无" "grep -q '^PermitEmptyPasswords no' /etc/ssh/sshd_config" "FALSE"
-    add_item "修改 SSH 默认端口" "避开全网爆破扫描" "需放行新端口" "[ \"$CUR_P\" != \"22\" ]" "TRUE"
-    add_item "禁用 SSH 密码认证" "彻底防御暴力破解" "需预先配置密钥" "grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config" "TRUE"
-    add_item "SSH 空闲超时(10m)" "防范会话劫持" "长时间不操作断开" "grep -q '^ClientAliveInterval 600' /etc/ssh/sshd_config" "FALSE"
-    add_item "禁止 SSH Root 登录" "最高级别安全防护" "需创建普通用户" "grep -q '^PermitRootLogin no' /etc/ssh/sshd_config" "TRUE"
-    add_item "SSH 登录 Banner" "合规性警告标语" "无" "grep -q '^Banner' /etc/ssh/sshd_config" "FALSE"
-    add_item "禁止环境篡改" "防止 Shell 提权" "无" "grep -q '^PermitUserEnvironment no' /etc/ssh/sshd_config" "FALSE"
+    add_item "强制 SSH 协议 V2" "修复旧版协议严重漏洞" "不支持极古老的客户端" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
+    add_item "开启公钥认证支持" "允许使用密钥登录系统" "无" "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config" "FALSE"
+    add_item "禁止 SSH 空密码" "防止远程直接入侵系统" "无" "grep -q '^PermitEmptyPasswords no' /etc/ssh/sshd_config" "FALSE"
+    add_item "修改 SSH 默认端口" "避开全网 99% 爆破扫描" "需在防火墙放行新端口" "[ \"$CUR_P\" != \"22\" ]" "TRUE"
+    add_item "禁用 SSH 密码认证" "彻底防御暴力破解攻击" "需预先配置好 SSH 密钥" "grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config" "TRUE"
+    add_item "SSH 空闲超时(10m)" "防范管理员会话被劫持" "长时间不操作会自动断开" "grep -q '^ClientAliveInterval 600' /etc/ssh/sshd_config" "FALSE"
+    add_item "禁止 SSH Root 登录" "最高级别的账户安全防护" "需创建并使用普通用户" "grep -q '^PermitRootLogin no' /etc/ssh/sshd_config" "TRUE"
+    add_item "SSH 登录 Banner" "显示合规性警告标语" "无" "grep -q '^Banner' /etc/ssh/sshd_config" "FALSE"
+    add_item "禁止环境篡改" "防止通过环境变量提权" "无" "grep -q '^PermitUserEnvironment no' /etc/ssh/sshd_config" "FALSE"
 
     # 3. 账户安全
-    add_item "强制 10 位混合密码" "提高爆破难度" "改密变麻烦" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null || grep -q 'minlen=10' /etc/pam.d/system-auth 2>/dev/null" "FALSE"
-    add_item "密码修改最小间隔" "防止盗号频繁改密" "7天内禁止改回" "grep -q 'PASS_MIN_DAYS[[:space:]]*7' /etc/login.defs" "FALSE"
-    add_item "Shell 自动注销(10m)" "离机安全保护" "强制退出终端" "grep -q 'TMOUT=600' /etc/profile" "FALSE"
+    add_item "强制 10 位混合密码" "极大提高暴力破解难度" "修改密码变麻烦" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null || grep -q 'minlen=10' /etc/pam.d/system-auth 2>/dev/null" "FALSE"
+    add_item "密码修改最小间隔" "防止盗号者频繁改密锁号" "7天内无法改回原密码" "grep -q 'PASS_MIN_DAYS[[:space:]]*7' /etc/login.defs" "FALSE"
+    add_item "Shell 自动注销(10m)" "保护离机后的终端安全" "长时间挂机需重连" "grep -q 'TMOUT=600' /etc/profile" "FALSE"
 
     # 4. 权限与文件
-    add_item "修正 /etc/passwd" "防非法修改用户信息" "无" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]" "FALSE"
-    add_item "修正 /etc/shadow" "防泄露密码哈希" "无" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]" "FALSE"
-    add_item "修正 sshd_config" "保护 SSH 配置" "无" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]" "FALSE"
-    add_item "修正 authorized_keys" "保护公钥文件" "无" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]" "FALSE"
-    add_item "清理危险 SUID" "堵死提权漏洞" "普通用户无法ping" "[ ! -u /bin/mount ]" "FALSE"
+    add_item "修正 /etc/passwd" "防止非法修改用户信息" "无" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]" "FALSE"
+    add_item "修正 /etc/shadow" "防止泄露密码哈希值" "无" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]" "FALSE"
+    add_item "修正 sshd_config" "保护 SSH 核心配置文件" "无" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]" "FALSE"
+    add_item "修正 authorized_keys" "保护公钥文件不被篡改" "无" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]" "FALSE"
+    add_item "清理危险 SUID" "堵死利用系统指令提权" "普通用户无法使用 ping" "[ ! -u /bin/mount ]" "FALSE"
 
     # 5. 限制与加固
-    add_item "锁定异常 UID=0" "清理后门账号" "误锁管理员" "[ -z \"\$(awk -F: '(\$3 == 0 && \$1 != \"root\"){print \$1}' /etc/passwd)\" ]" "TRUE"
-    add_item "移除 Sudo 免密" "防恶意脚本提权" "脚本需适配" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1" "TRUE"
-    add_item "限制 su 仅 wheel" "缩减 Root 切换范围" "需加 wheel 组" "grep -q 'pam_wheel.so' /etc/pam.d/su || grep -q 'pam_wheel.so' /etc/pam.d/system-auth" "FALSE"
-    add_item "限制编译器权限" "防编译木马病毒" "无" "local g=\$(command -v gcc); [ -z \"\$g\" ] || [ \"\$(stat -c %a \"\$(readlink -f \"\$g\")\")\" == \"700\" ]" "FALSE"
-    add_item "扩展 SUID 清理" "宝塔推荐加固" "更多限制" "[ ! -u /usr/bin/wall ]" "FALSE"
-    add_item "锁定 Bootloader" "防物理接触篡改" "影响 Grub 更新" "[ \"\$(stat -c %a /boot/grub/grub.cfg 2>/dev/null)\" == \"600\" ]" "FALSE"
+    add_item "锁定异常 UID=0" "清理潜在的后门账号" "可能误锁自建管理员" "[ -z \"\$(awk -F: '(\$3 == 0 && \$1 != \"root\"){print \$1}' /etc/passwd)\" ]" "TRUE"
+    add_item "移除 Sudo 免密" "防止恶意脚本静默提权" "自动化脚本需适配密码" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1" "TRUE"
+    add_item "限制 su 仅 wheel" "缩减 Root 切换权限范围" "需将用户加入 wheel 组" "grep -q 'pam_wheel.so' /etc/pam.d/su || grep -q 'pam_wheel.so' /etc/pam.d/system-auth" "FALSE"
+    add_item "限制编译器权限" "防止黑客编译木马病毒" "无" "local g=\$(command -v gcc); [ -z \"\$g\" ] || [ \"\$(stat -c %a \"\$(readlink -f \"\$g\")\")\" == \"700\" ]" "FALSE"
+    add_item "扩展 SUID 清理" "宝塔面板推荐的高级加固" "更多系统指令受限" "[ ! -u /usr/bin/wall ]" "FALSE"
+    add_item "锁定 Bootloader" "防止物理接触篡改引导" "内核/Grub 更新受影响" "[ \"\$(stat -c %a /boot/grub/grub.cfg 2>/dev/null)\" == \"600\" ]" "FALSE"
 
     # 6. 内核防御
-    add_item "网络内核防欺骗" "防 ICMP 重定向" "无" "sysctl net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '= 0'" "FALSE"
-    add_item "开启 SYN Cookie" "防 DDoS 洪水攻击" "无" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'" "FALSE"
-    add_item "禁用高危协议" "封堵罕见协议漏洞" "特殊应用受限" "[ -f /etc/modprobe.d/disable-uncommon.conf ]" "FALSE"
-    add_item "禁用非常用文件系统" "宝塔推荐加固" "禁 JFFS2/UDF" "[ -f /etc/modprobe.d/disable-filesystems.conf ]" "FALSE"
-    add_item "记录恶意数据包" "监控 Martian 包" "增加日志量" "sysctl net.ipv4.conf.all.log_martians 2>/dev/null | grep -q '= 1'" "FALSE"
+    add_item "网络内核防欺骗" "防止 ICMP 重定向攻击" "无" "sysctl net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '= 0'" "FALSE"
+    add_item "开启 SYN Cookie" "防御 DDoS 洪水攻击" "无" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'" "FALSE"
+    add_item "禁用高危协议" "封堵罕见网络协议漏洞" "特殊应用可能受限" "[ -f /etc/modprobe.d/disable-uncommon.conf ]" "FALSE"
+    add_item "禁用非常用文件系统" "宝塔推荐加固 (JFFS2/UDF)" "无" "[ -f /etc/modprobe.d/disable-filesystems.conf ]" "FALSE"
+    add_item "记录恶意数据包" "监控 Martian 来源包" "增加系统日志量" "sysctl net.ipv4.conf.all.log_martians 2>/dev/null | grep -q '= 1'" "FALSE"
 
     # 7. 审计与更新
-    add_item "时间同步(Chrony)" "确保日志时间准确" "无" "command -v chronyd >/dev/null || systemctl is-active --quiet systemd-timesyncd" "FALSE"
-    add_item "日志自动轮转(500M)" "防止磁盘爆满" "减少历史记录" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf" "FALSE"
-    add_item "Fail2ban 最佳防护" "自动封禁暴力 IP" "误输密码也封" "command -v fail2ban-server >/dev/null" "FALSE"
-    add_item "每日自动更新组件" "自动打安全补丁" "软件版本微变" "command -v unattended-upgrades dnf-automatic" "FALSE"
-    add_item "立即修复高危漏洞" "修复 CVE 漏洞" "需联网" "! is_eol && { dpkg --compare-versions \$(dpkg-query -f='\${Version}' -W dpkg 2>/dev/null || echo 0) ge 1.20.10; }" "FALSE"
+    add_item "时间同步(Chrony)" "确保日志时间准确可追溯" "无" "command -v chronyd >/dev/null || systemctl is-active --quiet systemd-timesyncd" "FALSE"
+    add_item "日志自动轮转(500M)" "防止日志爆满占死磁盘" "减少历史日志保留" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf" "FALSE"
+    add_item "Fail2ban 最佳防护" "自动封禁暴力破解 IP" "误输多次密码也会被封" "command -v fail2ban-server >/dev/null" "FALSE"
+    add_item "每日自动更新组件" "自动打补丁修复漏洞" "软件版本会有微变" "command -v unattended-upgrades || command -v dnf-automatic" "FALSE"
+    add_item "立即修复高危漏洞" "立即修复已知 CVE 漏洞" "需保持网络连接畅通" "! is_eol && { dpkg --compare-versions \$(dpkg-query -f='\${Version}' -W dpkg 2>/dev/null || echo 0) ge 1.20.10; }" "FALSE"
 }
 
 apply_fix() {
@@ -301,23 +287,33 @@ apply_fix() {
             fi ;;
         "安装装机必备软件") smart_install "curl wget vim unzip htop git net-tools" ;;
         "双引擎 DNS 优化") smart_dns_fix ;;
-        # ... (常规加固) ...
         "强制 SSH 协议 V2") sed -i '/^Protocol/d' /etc/ssh/sshd_config; echo "Protocol 2" >> /etc/ssh/sshd_config ;;
         "开启公钥认证支持") sed -i '/^PubkeyAuthentication/d' /etc/ssh/sshd_config; echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config ;;
         "禁止 SSH 空密码") sed -i '/^PermitEmptyPasswords/d' /etc/ssh/sshd_config; echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config ;;
+        
+        # [关键修复] SSH 端口修改明确回显
         "修改 SSH 默认端口")
             local p_ok=1; while [ $p_ok -ne 0 ]; do
                 read -p "   新端口 (回车随机): " i_p; local T_P=${i_p:-$(shuf -i 20000-60000 -n 1)}
-                ss -tuln | grep -q ":$T_P " && ui_warn "端口冲突" || p_ok=0
-            done; sed -i '/^Port/d' /etc/ssh/sshd_config; echo "Port $T_P" >> /etc/ssh/sshd_config
-            command -v ufw >/dev/null && ufw allow $T_P/tcp >/dev/null ;;
+                if ss -tuln | grep -q ":$T_P "; then ui_warn "端口 $T_P 被占用，请重试"; else p_ok=0; fi
+            done
+            sed -i '/^Port/d' /etc/ssh/sshd_config; echo "Port $T_P" >> /etc/ssh/sshd_config
+            command -v ufw >/dev/null && ufw allow $T_P/tcp >/dev/null
+            ui_ok "SSH 端口已修改为: ${BOLD}${GREEN}$T_P${RESET} (请牢记!)"
+            ;;
+            
         "禁用 SSH 密码认证") sed -i '/^PasswordAuthentication/d' /etc/ssh/sshd_config; echo "PasswordAuthentication no" >> /etc/ssh/sshd_config ;;
         "SSH 空闲超时(10m)") sed -i '/^ClientAliveInterval/d' /etc/ssh/sshd_config; echo "ClientAliveInterval 600" >> /etc/ssh/sshd_config ;;
         "禁止 SSH Root 登录") sed -i '/^PermitRootLogin/d' /etc/ssh/sshd_config; echo "PermitRootLogin no" >> /etc/ssh/sshd_config ;;
         "SSH 登录 Banner") echo "Restricted Access." > /etc/ssh/banner_warn; sed -i '/^Banner/d' /etc/ssh/sshd_config; echo "Banner /etc/ssh/banner_warn" >> /etc/ssh/sshd_config ;;
         "禁止环境篡改") sed -i '/^PermitUserEnvironment/d' /etc/ssh/sshd_config; echo "PermitUserEnvironment no" >> /etc/ssh/sshd_config ;;
-        "强制 10 位混合密码") smart_install "libpam-pwquality libpwquality" 
+        
+        # [关键修复] 智能判断 libpam-pwquality 包名 (Debian vs RHEL)
+        "强制 10 位混合密码") 
+            if command -v apt-get >/dev/null; then smart_install "libpam-pwquality"
+            elif command -v dnf >/dev/null || command -v yum >/dev/null; then smart_install "libpwquality"; fi
             [ -f /etc/pam.d/common-password ] && sed -i '/pwquality.so/c\password requisite pam_pwquality.so retry=3 minlen=10 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=0' /etc/pam.d/common-password ;;
+            
         "密码修改最小间隔") sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS 7/' /etc/login.defs; chage --mindays 7 root 2>/dev/null ;;
         "Shell 自动注销(10m)") grep -q "TMOUT=600" /etc/profile || echo -e "export TMOUT=600\nreadonly TMOUT" >> /etc/profile ;;
         "修正 /etc/passwd") chmod 644 /etc/passwd ;;
@@ -348,7 +344,12 @@ maxretry = 5
 enabled = true
 EOF
             systemctl enable --now fail2ban >/dev/null 2>&1; } ;;
-        "每日自动更新组件") smart_install "unattended-upgrades dnf-automatic"; systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 ;;
+            
+        # [关键修复] 智能判断自动更新包名 (Debian vs RHEL)
+        "每日自动更新组件") 
+            if command -v apt-get >/dev/null; then smart_install "unattended-upgrades"
+            elif command -v dnf >/dev/null; then smart_install "dnf-automatic"; systemctl enable --now dnf-automatic.timer; fi ;;
+            
         "立即修复高危漏洞")
              if is_eol; then ui_fail "系统过老已停更，跳过。"; else
                  handle_lock
@@ -379,10 +380,8 @@ while true; do
     for ((i=1; i<=COUNT; i++)); do
         if [ "${SELECTED[$i]}" == "TRUE" ]; then S_ICO="${GREEN}[ ON ]${RESET}"; else S_ICO="${GREY}[OFF ]${RESET}"; fi
         if [ "${STATUS[$i]}" == "PASS" ]; then R_ICO="${GREEN}${I_OK}${RESET}"; else R_ICO="${RED}${I_FAIL}${RESET}"; fi
-        
-        # [关键修改] 打印完整的 PROS (优点) 和 RISKS (风险)
+        # [关键修复] 完整打印 PROS 和 RISKS，不再省略
         printf "${GREY}%2d.${RESET} %b %b %-25s ${GREY}[优点: %s] [风险: %s]${RESET}\n" "$i" "$S_ICO" "$R_ICO" "${TITLES[$i]}" "${PROS[$i]}" "${RISKS[$i]}"
-        
         if [ "${SELECTED[$i]}" == "TRUE" ]; then SUM_IDS="${SUM_IDS}${i}, "; [ "${IS_RISKY[$i]}" == "TRUE" ] && has_r="TRUE"; fi
     done
     echo "${BLUE}================================================================================${RESET}"
@@ -392,7 +391,7 @@ while true; do
     read -r ri
     case "$ri" in
         q|Q) 
-            # [关键修复] 用户主动退出时，解除 trap，不再暂停
+            # [关键修复] 退出前解除 trap，不再暂停，直接返回主菜单
             trap - EXIT
             exit 0 
             ;; 
@@ -404,7 +403,7 @@ while true; do
             for ((i=1; i<=COUNT; i++)); do [ "${SELECTED[$i]}" == "TRUE" ] && apply_fix "$i"; done
             /usr/sbin/sshd -t >/dev/null 2>&1 && { systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; ui_ok "SSH 已重载。"; }
             
-            # [关键修复] 修复完成后解除 trap，使用显式暂停逻辑
+            # [关键修复] 修复完成后解除 trap，使用显式暂停逻辑，用户按键后退出
             trap - EXIT
             echo -ne "\n${YELLOW}【重要】流程执行完毕。按任意键返回主菜单...${RESET}"; read -n 1 -s -r; exit 0 ;;
         *) for n in $ri; do 
