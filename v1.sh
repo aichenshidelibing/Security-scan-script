@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v32.1 批量极速安装版)
-# 特性：软件批量安装(不再卡锁) | 智能DNS | 33项全量 | 救砖自愈 | 进度条
+# v1.sh - Linux 基础安全加固 (v37.0 双引擎·全境优化终极版)
+# 特性：中/外双向DNS优化 | 鹰眼防火墙检测 | 云毒瘤清理 | 39项全量
 
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
@@ -23,6 +23,7 @@ RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'
 CYAN=$(printf '\033[36m'); GREY=$(printf '\033[90m'); RESET=$(printf '\033[0m'); BOLD=$(printf '\033[1m')
 I_OK=$([ "$USE_EMOJI" == "1" ] && echo "✅" || echo "[ OK ]"); I_FAIL=$([ "$USE_EMOJI" == "1" ] && echo "❌" || echo "[FAIL]")
 I_INFO=$([ "$USE_EMOJI" == "1" ] && echo "ℹ️ " || echo "[INFO]"); I_WAIT=$([ "$USE_EMOJI" == "1" ] && echo "⏳" || echo "[WAIT]")
+I_NET=$([ "$USE_EMOJI" == "1" ] && echo "🌐" || echo "[NET]"); I_WALL=$([ "$USE_EMOJI" == "1" ] && echo "🧱" || echo "[FW]")
 
 # --- 辅助工具 ---
 ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
@@ -46,6 +47,43 @@ show_spinner() {
 
 check_space() { [ $(df / | awk 'NR==2 {print $4}') -lt 204800 ] && { ui_fail "磁盘不足 200MB，停止。"; return 1; }; return 0; }
 
+# --- [鹰眼] 网络态势感知 ---
+network_insight() {
+    echo -e "${BLUE}================================================================================${RESET}"
+    echo -ne "${BOLD}正在进行网络与防火墙态势感知...${RESET}"
+    
+    # 1. 内部防火墙
+    local fw_status="${GREEN}未运行${RESET}"
+    if command -v ufw >/dev/null && ufw status | grep -q "active"; then fw_status="${YELLOW}UFW 运行中${RESET}"; fi
+    if command -v firewall-cmd >/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then fw_status="${YELLOW}Firewalld 运行中${RESET}"; fi
+    if [ $(iptables -L INPUT | wc -l) -gt 10 ]; then fw_status="${YELLOW}Iptables 活跃${RESET}"; fi
+
+    # 2. 出站连通性 (随机采样)
+    local net_status=""
+    # ICMP
+    if ping -c 1 -W 1 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then 
+        net_status="${GREEN}ICMP(通)${RESET}"
+    else 
+        net_status="${RED}ICMP(断)${RESET}"
+    fi
+    # TCP (Web)
+    if curl -s --connect-timeout 2 https://www.baidu.com >/dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com >/dev/null 2>&1; then
+        net_status="$net_status | ${GREEN}TCP(通)${RESET}"
+    else
+        net_status="$net_status | ${RED}TCP(断)${RESET}"
+    fi
+    # UDP (DNS 53)
+    if timeout 2 nslookup google.com 8.8.8.8 >/dev/null 2>&1 || timeout 2 nslookup baidu.com 223.5.5.5 >/dev/null 2>&1; then
+        net_status="$net_status | ${GREEN}UDP(通)${RESET}"
+    else
+        net_status="$net_status | ${RED}UDP(断)${RESET}"
+    fi
+
+    echo -e "\r${I_WALL} 内部防火墙: [ $fw_status ]   ${I_NET} 网络连通性: [ $net_status ]"
+    echo -e "${GREY}(提示: 若网络不通，请优先检查云厂商控制台的安全组设置)${RESET}"
+    echo -e "${BLUE}================================================================================${RESET}"
+}
+
 # --- 智能锁管理 ---
 handle_lock() {
     local lock="/var/lib/dpkg/lock-frontend"
@@ -54,7 +92,6 @@ handle_lock() {
     local count=0; while fuser "$lock" >/dev/null 2>&1 && [ $count -lt 5 ]; do sleep 1; count=$((count+1)); done
     if fuser "$lock" >/dev/null 2>&1; then
         local pid=$(fuser "$lock" 2>/dev/null | awk '{print $NF}')
-        # 强制静默解锁，防止小白卡死
         kill -9 "$pid" 2>/dev/null
         rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null
         dpkg --configure -a >/dev/null 2>&1
@@ -62,22 +99,19 @@ handle_lock() {
     return 0
 }
 
-# --- 核心：老旧系统救砖 & 换源 ---
+# --- 老旧系统换源 ---
 fix_eol_sources() {
-    # CentOS 7
     if [ -f /etc/centos-release ]; then
         local ver=$(rpm -q --qf "%{VERSION}" -f /etc/centos-release)
         if [[ "$ver" == "7" ]]; then
             if ! grep -q "vault.centos.org" /etc/yum.repos.d/CentOS-Base.repo 2>/dev/null; then
                 ui_info "检测到 CentOS 7 (EOL)，切换至 Vault 源..."
-                mkdir -p /etc/yum.repos.d/backup
-                mv /etc/yum.repos.d/*.repo /etc/yum.repos.d/backup/ 2>/dev/null
+                mkdir -p /etc/yum.repos.d/backup; mv /etc/yum.repos.d/*.repo /etc/yum.repos.d/backup/ 2>/dev/null
                 curl -o /etc/yum.repos.d/CentOS-Base.repo https://raw.githubusercontent.com/hackyo/source/master/CentOS-7-Vault-Aliyun.repo >/dev/null 2>&1
                 yum clean all >/dev/null 2>&1; yum makecache >/dev/null 2>&1
             fi
         fi
     fi
-    # Debian/Ubuntu EOL
     if [ -f /etc/debian_version ]; then
         if grep -qE "^(8|9|10)" /etc/debian_version; then
              if ! grep -q "archive.debian.org" /etc/apt/sources.list; then
@@ -92,48 +126,89 @@ fix_eol_sources() {
     fi
 }
 
-# --- 智能 DNS ---
+# --- [修正] 双引擎地域感知 DNS 修复 ---
 smart_dns_fix() {
-    if ping -c 1 -W 2 google.com >/dev/null 2>&1 || ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
-        ui_ok "网络正常，保留当前 DNS。"
-        return 0
+    ui_info "正在进行地域与 DNS 深度审计..."
+    
+    # 1. 获取位置 (Cloudflare 优先)
+    local loc=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace | grep "loc=" | cut -d= -f2)
+    
+    # 2. 断网/失败时的盲测逻辑
+    if [ -z "$loc" ]; then
+        local cn_ping=$(ping -c 1 -W 1 223.5.5.5 | grep time= | cut -d= -f4 | cut -d. -f1); [ -z "$cn_ping" ] && cn_ping=999
+        local global_ping=$(ping -c 1 -W 1 8.8.8.8 | grep time= | cut -d= -f4 | cut -d. -f1); [ -z "$global_ping" ] && global_ping=999
+        if [ "$cn_ping" -lt "$global_ping" ]; then loc="CN"; else loc="US"; fi
     fi
-    ui_warn "网络异常，尝试修复 DNS..."
-    if ping -c 1 -W 2 baidu.com >/dev/null 2>&1; then
-        echo "nameserver 223.5.5.5" > /etc/resolv.conf
+    ui_info "识别到服务器物理位置: ${loc:-Unknown}"
+
+    # 3. 检查当前 DNS 成分
+    local current_dns=$(cat /etc/resolv.conf)
+    local has_cn_dns=0; echo "$current_dns" | grep -qE "223\.5\.5\.5|119\.29\.29\.29|114\.114\.114\.114|180\.76\.76\.76" && has_cn_dns=1
+    local has_global_dns=0; echo "$current_dns" | grep -qE "8\.8\.8\.8|1\.1\.1\.1" && has_global_dns=1
+
+    # 4. 执行双向修正
+    if [ "$loc" == "CN" ]; then
+        # === [国内逻辑] 绝不含糊，必须用国内DNS ===
+        if [ "$has_cn_dns" -eq 0 ] || [ "$has_global_dns" -eq 1 ]; then
+             ui_warn "国内机器配置不当 (使用了国外DNS或为空)，正在强制优化..."
+             echo "nameserver 223.5.5.5" > /etc/resolv.conf
+             echo "nameserver 119.29.29.29" >> /etc/resolv.conf
+             ui_ok "DNS 已修正为国内标准 (阿里云/腾讯云)。"
+        else
+             ui_ok "DNS 配置符合中国地域标准。"
+        fi
     else
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+        # === [国外逻辑] 绝不含糊，必须用国际DNS ===
+        if [ "$has_cn_dns" -eq 1 ]; then
+            ui_warn "检测到海外机器混用了中国 DNS (导致连接被阻断)，正在强制修正..."
+            echo "nameserver 1.1.1.1" > /etc/resolv.conf
+            echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+            ui_ok "DNS 已修正为国际标准 (Cloudflare/Google)。"
+        elif [ "$has_global_dns" -eq 0 ]; then
+             echo "nameserver 1.1.1.1" > /etc/resolv.conf
+             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+             ui_ok "DNS 已初始化为国际标准。"
+        else
+             ui_ok "DNS 配置符合海外地域标准。"
+        fi
     fi
-    ui_ok "DNS 已修正。"
 }
 
-# --- 全局环境自愈 ---
+# --- 智能 Swap ---
+check_swap() {
+    if [ $(free -m | awk '/^Swap:/ {print $2}') -eq 0 ] && [ $(free -m | awk '/^Mem:/ {print $2}') -lt 4000 ]; then return 1; fi
+    return 0
+}
+
+# --- 毒瘤清理 ---
+clean_cloud_quirks() {
+    [ -f /etc/yum/pluginconf.d/subscription-manager.conf ] && sed -i 's/enabled=1/enabled=0/' /etc/yum/pluginconf.d/subscription-manager.conf 2>/dev/null
+    if command -v netfilter-persistent >/dev/null; then systemctl is-enabled netfilter-persistent >/dev/null 2>&1 && systemctl start netfilter-persistent >/dev/null 2>&1; fi
+}
+
+# --- 全局自愈 ---
 heal_environment() {
-    ui_info "正在进行环境自愈..."
-    smart_dns_fix
+    network_insight
+    ui_info "正在初始化环境..."
+    clean_cloud_quirks
     handle_lock
     fix_eol_sources
+    smart_dns_fix # 换源后立即修DNS，确保update能通
+    
     if command -v apt-get >/dev/null; then
         ( UCF_FORCE_CONFFOLD=1 dpkg --configure -a && apt-get install -f -y ) >/dev/null 2>&1
     elif command -v yum >/dev/null; then
         yum install -y epel-release >/dev/null 2>&1
     fi
-    ui_ok "环境准备就绪。"
+    ui_ok "环境自愈完成。"
 }
 
-# --- 核心修改：批量智能安装 ---
+# --- 批量安装 ---
 smart_install() {
-    # 接收所有参数作为一个字符串，不加引号以允许单词分割
     local pkgs="$*"
-    
-    # 检查是否全部已安装 (简单检查第一个即可，或者不做检查直接跑install)
-    # 为了效率，直接交给包管理器去判断谁需要安装，不重复造轮子
-    
     handle_lock
     ui_info "批量安装组件: $pkgs ..."
     local log="/tmp/install_err.log"
-    
-    # 注意：这里 $pkgs 不加引号，让 shell 把它拆分成多个参数传递给 apt/yum
     if command -v apt-get >/dev/null; then
         ( UCF_FORCE_CONFFOLD=1 apt-get install -y $pkgs ) >/dev/null 2>"$log" &
     elif command -v dnf >/dev/null; then
@@ -141,21 +216,12 @@ smart_install() {
     elif command -v yum >/dev/null; then
         yum install -y $pkgs >/dev/null 2>"$log" &
     else return 1; fi
-    
-    local pid=$!
-    show_spinner "$pid"
-    wait "$pid"
-    
-    if [ $? -ne 0 ]; then
-        ui_fail "部分软件安装失败，日志:"
-        tail -n 5 "$log" 2>/dev/null
-        return 1
-    fi
-    rm -f "$log"
-    return 0
+    local pid=$!; show_spinner "$pid"; wait "$pid"
+    [ $? -ne 0 ] && { ui_fail "安装失败，日志:"; tail -n 5 "$log" 2>/dev/null; return 1; }
+    rm -f "$log"; return 0
 }
 
-# --- 数据定义 (33项) ---
+# --- 数据定义 (39项) ---
 declare -a TITLES PROS RISKS STATUS SELECTED IS_RISKY
 COUNT=0; MSG=""
 CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | tail -n 1); CUR_P=${CUR_P:-22}
@@ -167,21 +233,16 @@ add_item() {
     else STATUS[$COUNT]="FAIL"; [ "$5" == "TRUE" ] && SELECTED[$COUNT]="FALSE" || SELECTED[$COUNT]="TRUE"; fi
 }
 
-is_eol() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        [[ "$ID" == "debian" && "$VERSION_ID" -lt 10 ]] && return 0
-        [[ "$ID" == "ubuntu" && "${VERSION_ID%%.*}" -lt 16 ]] && return 0
-        [[ "$ID" == "centos" && "$VERSION_ID" -lt 7 ]] && return 0
-    fi
-    return 1
-}
+is_eol() { if [ -f /etc/os-release ]; then . /etc/os-release; [[ "$ID" == "debian" && "$VERSION_ID" -lt 10 ]] && return 0; [[ "$ID" == "ubuntu" && "${VERSION_ID%%.*}" -lt 16 ]] && return 0; [[ "$ID" == "centos" && "$VERSION_ID" -lt 7 ]] && return 0; fi; return 1; }
 
 init_audit() {
     # 1. 基础优化
     add_item "开启 TCP BBR 加速" "提升网络吞吐" "需内核支持" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr" "FALSE"
-    add_item "安装装机必备软件" "curl/wget/vim/htop/git" "少量空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
-    add_item "智能 DNS 优化" "提升解析速度" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
+    add_item "系统资源限制优化" "提升高并发能力" "无" "grep -q 'soft nofile 65535' /etc/security/limits.conf" "FALSE"
+    add_item "IPv4 优先策略" "解决IPv6超时卡顿" "IPv6可能变慢" "grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf" "FALSE"
+    add_item "智能 Swap 分区" "防止内存溢出死机" "占用少量磁盘" "check_swap" "FALSE"
+    add_item "安装装机必备软件" "curl/vim/htop/git" "占用空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
+    add_item "智能 DNS 优化" "地域感知/反劫持" "无" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf" "FALSE"
 
     # 2. SSH 安全
     add_item "强制 SSH 协议 V2" "修复旧版漏洞" "无" "grep -q '^Protocol 2' /etc/ssh/sshd_config" "FALSE"
@@ -238,11 +299,15 @@ apply_fix() {
             if uname -r | grep -q "^[5-9]"; then
                 echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf; echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf; sysctl -p >/dev/null 2>&1; ui_ok "BBR 已开启。"
             else ui_fail "内核版本过低 (<4.9)，不支持 BBR。"; fi ;;
-        
-        "安装装机必备软件")
-            # 核心修改：一次性传入所有包名，不加引号，让 apt/yum 一次性处理！
-            smart_install "curl wget vim unzip htop git net-tools" ;;
-            
+        "系统资源限制优化")
+            echo "* soft nofile 65535" >> /etc/security/limits.conf; echo "* hard nofile 65535" >> /etc/security/limits.conf; ui_ok "资源限制已优化。" ;;
+        "IPv4 优先策略")
+            sed -i '/^precedence ::ffff:0:0\/96/d' /etc/gai.conf 2>/dev/null; echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf; ui_ok "IPv4 优先已配置。" ;;
+        "智能 Swap 分区")
+            if check_swap; then ui_ok "无需处理。"; else
+                dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none; chmod 600 /swapfile; mkswap /swapfile; swapon /swapfile; echo "/swapfile none swap sw 0 0" >> /etc/fstab; ui_ok "1GB Swap 已创建。"
+            fi ;;
+        "安装装机必备软件") smart_install "curl wget vim unzip htop git net-tools" ;;
         "智能 DNS 优化") smart_dns_fix ;;
         "强制 SSH 协议 V2") sed -i '/^Protocol/d' /etc/ssh/sshd_config; echo "Protocol 2" >> /etc/ssh/sshd_config ;;
         "开启公钥认证支持") sed -i '/^PubkeyAuthentication/d' /etc/ssh/sshd_config; echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config ;;
@@ -258,7 +323,7 @@ apply_fix() {
         "禁止 SSH Root 登录") sed -i '/^PermitRootLogin/d' /etc/ssh/sshd_config; echo "PermitRootLogin no" >> /etc/ssh/sshd_config ;;
         "SSH 登录 Banner") echo "Restricted Access." > /etc/ssh/banner_warn; sed -i '/^Banner/d' /etc/ssh/sshd_config; echo "Banner /etc/ssh/banner_warn" >> /etc/ssh/sshd_config ;;
         "禁止环境篡改") sed -i '/^PermitUserEnvironment/d' /etc/ssh/sshd_config; echo "PermitUserEnvironment no" >> /etc/ssh/sshd_config ;;
-        "强制 10 位混合密码") smart_install "libpam-pwquality libpwquality" # 尝试同时安装，有一个成功就行
+        "强制 10 位混合密码") smart_install "libpam-pwquality libpwquality" 
             [ -f /etc/pam.d/common-password ] && sed -i '/pwquality.so/c\password requisite pam_pwquality.so retry=3 minlen=10 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=0' /etc/pam.d/common-password ;;
         "密码修改最小间隔") sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS 7/' /etc/login.defs; chage --mindays 7 root 2>/dev/null ;;
         "Shell 自动注销(10m)") grep -q "TMOUT=600" /etc/profile || echo -e "export TMOUT=600\nreadonly TMOUT" >> /etc/profile ;;
