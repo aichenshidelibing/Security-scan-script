@@ -32,20 +32,19 @@ trap finish_trap EXIT
 trap 'trap - EXIT; echo -e "\n\033[33m[用户强制终止] 正在返回主菜单...\033[0m"; exit 0' INT
 
 # =========================
-# UI 自适应
+# UI 自适应（默认 ASCII 图标）
 # =========================
-[ "${USE_EMOJI:-}" = "" ] && { [[ "${LANG:-}" =~ "UTF-8" ]] && USE_EMOJI="1" || USE_EMOJI="0"; }
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m')
 CYAN=$(printf '\033[36m'); GREY=$(printf '\033[90m'); RESET=$(printf '\033[0m'); BOLD=$(printf '\033[1m')
 
-I_OK=$([ "$USE_EMOJI" = "1" ] && echo "✅" || echo "[ OK ]")
-I_FAIL=$([ "$USE_EMOJI" = "1" ] && echo "❌" || echo "[FAIL]")
-I_INFO=$([ "$USE_EMOJI" = "1" ] && echo "ℹ️ " || echo "[INFO]")
-I_WAIT=$([ "$USE_EMOJI" = "1" ] && echo "⏳" || echo "[WAIT]")
-I_NET=$([ "$USE_EMOJI" = "1" ] && echo "🌐" || echo "[NET]")
-I_WALL=$([ "$USE_EMOJI" = "1" ] && echo "🧱" || echo "[FW]")
-I_FIX=$([ "$USE_EMOJI" = "1" ] && echo "🛠️ " || echo "[FIX ]")
-I_LIST=$([ "$USE_EMOJI" = "1" ] && echo "📋" || echo "[LIST]")
+I_OK="[ OK ]"
+I_FAIL="[FAIL]"
+I_INFO="[INFO]"
+I_WAIT="[WAIT]"
+I_NET="[NET]"
+I_WALL="[ FW ]"
+I_FIX="[FIX ]"
+I_LIST="[LIST]"
 
 ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
 ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
