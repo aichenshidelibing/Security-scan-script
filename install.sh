@@ -9,7 +9,7 @@ export LC_ALL=C
 FORCE_TEXT_MODE=0
 
 # --- 配置 ---
-GITHUB_BASE="https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+GITHUB_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
 TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>" # 唯一特征识别码
 
 # --- [核心] 智能环境检测与配色 ---
