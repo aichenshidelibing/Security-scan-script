@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# <SEC_SCRIPT_MARKER_v2.3>
-# v1.sh - Linux 基础安全加固 (v42.1)
+# <SEC_SCRIPT_MARKER_v2.4>
+# v1.sh - Linux 基础安全加固 (v42.2)
+# 特性：
+# - 风险项永不默认勾选；all 只全选非风险项；all! 才包含风险项
+# - 风险项执行：总确认 + 逐项二次确认（必须输入 yes）
+# - DNS：默认不改；仅当检测到解析异常且用户选择该项时自愈；修复时尽量选“就近 DNS”
+# - SSH：优先 drop-in；语法检测 sshd -t 通过才 reload；关键锁死项额外护栏（无公钥则拒绝执行）
+
+set -u
 
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
@@ -19,7 +26,7 @@ fi
 # =========================
 finish_trap() {
   echo -e "\n\033[33m[系统提示] 脚本执行结束。按回车键继续...\033[0m"
-  read -r
+  read -r || true
 }
 trap finish_trap EXIT
 trap 'trap - EXIT; echo -e "\n\033[33m[用户强制终止] 正在返回主菜单...\033[0m"; exit 0' INT
@@ -27,18 +34,18 @@ trap 'trap - EXIT; echo -e "\n\033[33m[用户强制终止] 正在返回主菜单
 # =========================
 # UI 自适应
 # =========================
-[ "${USE_EMOJI:-}" == "" ] && { [[ "${LANG:-}" =~ "UTF-8" ]] && USE_EMOJI="1" || USE_EMOJI="0"; }
+[ "${USE_EMOJI:-}" = "" ] && { [[ "${LANG:-}" =~ "UTF-8" ]] && USE_EMOJI="1" || USE_EMOJI="0"; }
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m')
 CYAN=$(printf '\033[36m'); GREY=$(printf '\033[90m'); RESET=$(printf '\033[0m'); BOLD=$(printf '\033[1m')
 
-I_OK=$([ "$USE_EMOJI" == "1" ] && echo "✅" || echo "[ OK ]")
-I_FAIL=$([ "$USE_EMOJI" == "1" ] && echo "❌" || echo "[FAIL]")
-I_INFO=$([ "$USE_EMOJI" == "1" ] && echo "ℹ️ " || echo "[INFO]")
-I_WAIT=$([ "$USE_EMOJI" == "1" ] && echo "⏳" || echo "[WAIT]")
-I_NET=$([ "$USE_EMOJI" == "1" ] && echo "🌐" || echo "[NET]")
-I_WALL=$([ "$USE_EMOJI" == "1" ] && echo "🧱" || echo "[FW]")
-I_FIX=$([ "$USE_EMOJI" == "1" ] && echo "🛠️ " || echo "[FIX ]")
-I_LIST=$([ "$USE_EMOJI" == "1" ] && echo "📋" || echo "[LIST]")
+I_OK=$([ "$USE_EMOJI" = "1" ] && echo "✅" || echo "[ OK ]")
+I_FAIL=$([ "$USE_EMOJI" = "1" ] && echo "❌" || echo "[FAIL]")
+I_INFO=$([ "$USE_EMOJI" = "1" ] && echo "ℹ️ " || echo "[INFO]")
+I_WAIT=$([ "$USE_EMOJI" = "1" ] && echo "⏳" || echo "[WAIT]")
+I_NET=$([ "$USE_EMOJI" = "1" ] && echo "🌐" || echo "[NET]")
+I_WALL=$([ "$USE_EMOJI" = "1" ] && echo "🧱" || echo "[FW]")
+I_FIX=$([ "$USE_EMOJI" = "1" ] && echo "🛠️ " || echo "[FIX ]")
+I_LIST=$([ "$USE_EMOJI" = "1" ] && echo "📋" || echo "[LIST]")
 
 ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
 ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
@@ -47,6 +54,8 @@ ui_fail() { echo -e "${RED}${I_FAIL} $*${RESET}"; }
 
 is_tty() { [ -t 1 ]; }
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+do_clear() { has_cmd clear && clear || true; }
 
 # =========================
 # 会话模式：远程/本地（用于提示和更严格护栏）
@@ -107,17 +116,15 @@ declare -A BACKED_UP=()
 disk_free_kb_root() { df -Pk / | awk 'NR==2{print $4}'; }
 
 backup_enabled() {
-  # 空间 <300MB 不备份，防止小盘爆炸
   local free_kb
   free_kb="$(disk_free_kb_root)"
   [ -n "$free_kb" ] || return 1
-  [ "$free_kb" -ge 307200 ] || return 1
+  [ "$free_kb" -ge 307200 ] || return 1  # <300MB 不备份
   return 0
 }
 
 backup_prune() {
   [ -d "$BACKUP_BASE" ] || return 0
-  # 保留最近 N 次
   local runs count
   runs="$(ls -1 "$BACKUP_BASE" 2>/dev/null | sort || true)"
   count="$(printf "%s\n" "$runs" | sed '/^$/d' | wc -l | awk '{print $1}')"
@@ -127,7 +134,7 @@ backup_prune() {
       rm -rf "${BACKUP_BASE:?}/$old" 2>/dev/null || true
     done
   fi
-  # 控制总大小
+
   local total_kb max_kb oldest
   total_kb="$(du -sk "$BACKUP_BASE" 2>/dev/null | awk '{print $1}')"
   max_kb=$((BACKUP_MAX_MB * 1024))
@@ -310,8 +317,6 @@ resolv_is_managed() {
 }
 
 dns_sanity_ok() {
-  # 解析正常：返回 0；解析异常：返回 1
-  # 优先不依赖 DNS 本身（但最终还是要通过“解析某个域名”判断是否恢复）
   if has_cmd timeout && has_cmd getent; then
     timeout 2 getent ahosts cloudflare.com >/dev/null 2>&1 && return 0
     timeout 2 getent ahosts www.baidu.com  >/dev/null 2>&1 && return 0
@@ -327,7 +332,6 @@ dns_sanity_ok() {
 }
 
 ping_ms() {
-  # 返回整数 ms；失败返回 9999
   has_cmd ping || { echo 9999; return 0; }
   local ip="$1" out
   out="$(ping -c 1 -W 1 "$ip" 2>/dev/null | awk -F'time=' '/time=/{print $2}' | awk '{print $1}' | cut -d. -f1)"
@@ -335,8 +339,6 @@ ping_ms() {
 }
 
 dns_pick_profile() {
-  # 输出：CN / GLOBAL / MIXED
-  # DNS 坏掉时，用 RTT 选就近；ping 不可用则 MIXED
   if ! has_cmd ping; then
     echo "MIXED"; return 0
   fi
@@ -379,13 +381,12 @@ dns_repair() {
     return 0
   fi
 
-  # NetworkManager：不强改（避免把用户企业内网 DNS 直接覆盖）
+  # NetworkManager：不强改（避免覆盖企业/内网 DNS）
   if has_cmd nmcli; then
     ui_warn "检测到 NetworkManager：为避免破坏连接配置，本脚本不强写 nmcli DNS。建议手工为对应连接设置 DNS。"
     return 0
   fi
 
-  # 非托管 resolv.conf：可直接写，但先识别被接管则跳过
   if resolv_is_managed; then
     ui_warn "/etc/resolv.conf 可能被系统接管，已避免直接覆盖。"
     return 0
@@ -518,11 +519,13 @@ ssh_test() {
 
 ssh_reload_safe() {
   if ssh_test; then
-    systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1 || true
+    if has_cmd systemctl; then
+      systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1 || true
+    fi
     ui_ok "SSH 已重载。"
     return 0
   fi
-  ui_fail "SSH 配置语法检测失败，已避免重载。"
+  ui_fail "SSH 配置语法检测失败，已避免重载（请检查 sshd_config）。"
   return 1
 }
 
@@ -575,7 +578,8 @@ bbr_supported() {
 # 选择/审计结构（去 eval）
 # =========================
 declare -a TITLES PROS RISKS STATUS SELECTED IS_RISKY CHECK_FN APPLY_FN
-COUNT=0; MSG=""
+COUNT=0
+MSG=""
 CUR_P="$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | tail -n 1)"
 CUR_P="${CUR_P:-22}"
 
@@ -638,19 +642,13 @@ chk_tmout() { grep -qE '^[[:space:]]*(export[[:space:]]+)?TMOUT=600' /etc/profil
 
 chk_mode_passwd() { [ "$(stat -c %a /etc/passwd 2>/dev/null)" = "644" ]; }
 chk_mode_shadow() { [ "$(stat -c %a /etc/shadow 2>/dev/null)" = "600" ]; }
-chk_mode_sshd() { [ "$(stat -c %a /etc/ssh/sshd_config 2>/dev/null)" = "600" ]; }
+chk_mode_sshd() { [ ! -f /etc/ssh/sshd_config ] || [ "$(stat -c %a /etc/ssh/sshd_config 2>/dev/null)" = "600" ]; }
 chk_mode_authkeys() { [ ! -f /root/.ssh/authorized_keys ] || [ "$(stat -c %a /root/.ssh/authorized_keys 2>/dev/null)" = "600" ]; }
 
-chk_suid_basic() {
-  [ ! -u /bin/mount ] && [ ! -u /bin/umount ] && [ ! -u /usr/bin/newgrp ] && [ ! -u /usr/bin/chsh ]
-}
-
+chk_suid_basic() { [ ! -u /bin/mount ] && [ ! -u /bin/umount ] && [ ! -u /usr/bin/newgrp ] && [ ! -u /usr/bin/chsh ]; }
 chk_uid0_clean() { [ -z "$(awk -F: '($3 == 0 && $1 != "root"){print $1}' /etc/passwd 2>/dev/null)" ]; }
 
-chk_sudo_nopasswd() {
-  ! (grep -R --line-number -E 'NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .)
-}
-
+chk_sudo_nopasswd() { ! (grep -R --line-number -E 'NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .); }
 chk_su_wheel() { grep -q 'pam_wheel.so' /etc/pam.d/su 2>/dev/null || grep -q 'pam_wheel.so' /etc/pam.d/system-auth 2>/dev/null; }
 
 chk_gcc_restrict() {
@@ -666,9 +664,10 @@ chk_grub_lock() { [ ! -f /boot/grub/grub.cfg ] || [ "$(stat -c %a /boot/grub/gru
 
 chk_accept_redirects() { sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '^0$'; }
 chk_syncookies() { sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '^1$'; }
+chk_log_martians() { sysctl -n net.ipv4.conf.all.log_martians 2>/dev/null | grep -q '^1$'; }
+
 chk_mod_uncommon() { [ -f /etc/modprobe.d/disable-uncommon.conf ]; }
 chk_mod_fs() { [ -f /etc/modprobe.d/disable-filesystems.conf ]; }
-chk_log_martians() { sysctl -n net.ipv4.conf.all.log_martians 2>/dev/null | grep -q '^1$'; }
 
 chk_time_sync() {
   if has_cmd systemctl; then
@@ -686,13 +685,12 @@ chk_auto_update() {
     [ -f /etc/apt/apt.conf.d/20auto-upgrades ] && grep -qE 'Unattended-Upgrade' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null && return 0
     return 1
   fi
-  if [ "$PM" = "dnf" ]; then
-    has_cmd dnf-automatic && has_cmd systemctl && systemctl is-enabled --quiet dnf-automatic.timer 2>/dev/null && return 0
+  if [ "$PM" = "dnf" ] || [ "$PM" = "yum" ]; then
+    has_cmd systemctl && systemctl is-enabled --quiet dnf-automatic.timer 2>/dev/null && return 0
     return 1
   fi
   return 1
 }
-chk_hotfix() { is_eol && return 1; return 0; }
 
 # =========================
 # 修复函数
@@ -703,12 +701,14 @@ fix_bbr() {
   set_kv_eq "$SYSCTL_FILE" "net.ipv4.tcp_congestion_control" "bbr"
   sysctl_apply
   ui_ok "BBR 已配置。"
+  return 0
 }
 
 fix_limits() {
   ensure_line /etc/security/limits.conf "* soft nofile 65535"
   ensure_line /etc/security/limits.conf "* hard nofile 65535"
   ui_ok "资源限制已优化。"
+  return 0
 }
 
 fix_ipv4_pref() {
@@ -716,19 +716,17 @@ fix_ipv4_pref() {
   sed -i '/^precedence ::ffff:0:0\/96/d' /etc/gai.conf 2>/dev/null || true
   ensure_line /etc/gai.conf "precedence ::ffff:0:0/96 100"
   ui_ok "IPv4 优先已配置。"
+  return 0
 }
 
-fix_swap() { swap_apply; }
-fix_tools() { smart_install curl wget vim unzip htop git net-tools ca-certificates; }
+fix_swap() { swap_apply; return 0; }
+fix_tools() { smart_install curl wget vim unzip htop git net-tools ca-certificates; return 0; }
 
-fix_dns() {
-  # 默认不改；只有“解析异常并被选择”时才会执行到这里
-  dns_repair
-}
+fix_dns() { dns_repair; return 0; }
 
-fix_ssh_proto2() { ssh_write_setting "Protocol" "2"; }
-fix_ssh_pubkey() { ssh_write_setting "PubkeyAuthentication" "yes"; }
-fix_ssh_empty_pw() { ssh_write_setting "PermitEmptyPasswords" "no"; }
+fix_ssh_proto2() { ssh_write_setting "Protocol" "2"; ui_ok "SSH Protocol 已设置为 2。"; return 0; }
+fix_ssh_pubkey() { ssh_write_setting "PubkeyAuthentication" "yes"; ui_ok "SSH 公钥认证已启用。"; return 0; }
+fix_ssh_empty_pw() { ssh_write_setting "PermitEmptyPasswords" "no"; ui_ok "SSH 空密码登录已禁用。"; return 0; }
 
 rand_port() {
   if has_cmd shuf; then
@@ -754,7 +752,7 @@ port_in_use() {
 fix_ssh_port() {
   local T_P=""
   while :; do
-    read -r -p "   新端口 (回车随机): " T_P
+    read -r -p "   新端口 (回车随机): " T_P || true
     T_P="${T_P:-$(rand_port)}"
     if port_in_use "$T_P"; then
       ui_warn "端口 $T_P 被占用，请重试"
@@ -770,7 +768,8 @@ fix_ssh_port() {
     firewall-cmd --add-port="${T_P}/tcp" --permanent >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
-  ui_ok "SSH 端口已修改为: ${BOLD}${GREEN}$T_P${RESET} (请同步云安全组/防火墙)"
+  ui_ok "SSH 端口已修改为: ${BOLD}${GREEN}$T_P${RESET}（请同步云安全组/ACL）"
+  return 0
 }
 
 fix_ssh_pw_auth_off() {
@@ -782,12 +781,14 @@ fix_ssh_pw_auth_off() {
   ssh_write_setting "KbdInteractiveAuthentication" "no"
   ssh_write_setting "ChallengeResponseAuthentication" "no"
   ui_ok "SSH 密码认证已禁用。"
+  return 0
 }
 
 fix_ssh_idle() {
   ssh_write_setting "ClientAliveInterval" "600"
   ssh_write_setting "ClientAliveCountMax" "0"
-  ui_ok "SSH 空闲超时已配置。"
+  ui_ok "SSH 空闲超时已配置（600s，无响应即断开）。"
+  return 0
 }
 
 fix_ssh_root_off() {
@@ -797,6 +798,7 @@ fix_ssh_root_off() {
   fi
   ssh_write_setting "PermitRootLogin" "no"
   ui_ok "Root SSH 登录已禁止。"
+  return 0
 }
 
 fix_ssh_banner() {
@@ -804,9 +806,14 @@ fix_ssh_banner() {
   printf "Restricted Access.\n" >"$SSH_BANNER"
   ssh_write_setting "Banner" "$SSH_BANNER"
   ui_ok "SSH Banner 已配置。"
+  return 0
 }
 
-fix_ssh_env() { ssh_write_setting "PermitUserEnvironment" "no"; ui_ok "SSH 环境篡改已禁止。"; }
+fix_ssh_env() {
+  ssh_write_setting "PermitUserEnvironment" "no"
+  ui_ok "SSH 环境篡改已禁止。"
+  return 0
+}
 
 fix_pass_policy() {
   if [ "$PM" = "apt" ]; then smart_install libpam-pwquality
@@ -839,7 +846,675 @@ fix_pass_policy() {
   return 0
 }
 
-fix_pass_min_days() { set_kv_space /etc/login.defs "PASS_MIN_DAYS" "7"; chage --mindays 7 root >/dev/null 2>&1 || true; ui_ok "PASS_MIN_DAYS 已设置。"; }
+fix_pass_min_days() {
+  set_kv_space /etc/login.defs "PASS_MIN_DAYS" "7"
+  chage --mindays 7 root >/dev/null 2>&1 || true
+  ui_ok "PASS_MIN_DAYS 已设置为 7。"
+  return 0
+}
 
 fix_tmout() {
-  if ! grep -qE 'TMOUT=600
+  backup_file /etc/profile
+  # 清理旧的 TMOUT 定义，避免多次追加产生歧义
+  sed -i -E '/^[[:space:]]*(export[[:space:]]+)?TMOUT=/d' /etc/profile 2>/dev/null || true
+  printf "\n# Auto logout (sec-script)\nTMOUT=600\nexport TMOUT\n" >>/etc/profile
+  ui_ok "TMOUT 已设置为 600 秒（适用于交互 shell）。"
+  return 0
+}
+
+fix_mode_passwd() { ensure_chmod 644 /etc/passwd && ui_ok "/etc/passwd 权限已修正。"; return 0; }
+fix_mode_shadow() { ensure_chmod 600 /etc/shadow && ui_ok "/etc/shadow 权限已修正。"; return 0; }
+fix_mode_sshd() {
+  [ -f /etc/ssh/sshd_config ] || { ui_warn "未找到 /etc/ssh/sshd_config，跳过。"; return 0; }
+  ensure_chmod 600 /etc/ssh/sshd_config && ui_ok "/etc/ssh/sshd_config 权限已修正。"
+  return 0
+}
+fix_mode_authkeys() {
+  [ -f /root/.ssh/authorized_keys ] || { ui_ok "root authorized_keys 不存在，无需处理。"; return 0; }
+  ensure_chmod 600 /root/.ssh/authorized_keys && ui_ok "root authorized_keys 权限已修正。"
+  return 0
+}
+
+fix_suid_basic() {
+  local x
+  for x in /bin/mount /bin/umount /usr/bin/newgrp /usr/bin/chsh; do
+    [ -e "$x" ] && chmod u-s "$x" 2>/dev/null || true
+  done
+  ui_ok "已移除部分基础 SUID（mount/umount/newgrp/chsh）。"
+  return 0
+}
+
+fix_uid0_clean() {
+  local bad
+  bad="$(awk -F: '($3 == 0 && $1 != "root"){print $1}' /etc/passwd 2>/dev/null || true)"
+  [ -z "$bad" ] && { ui_ok "未发现异常 UID=0 账户。"; return 0; }
+  ui_warn "发现异常 UID=0 账户: $bad"
+  # 只做锁定/禁用 shell（不擅自改 UID，避免破坏业务）
+  local u
+  for u in $bad; do
+    usermod -L "$u" >/dev/null 2>&1 || true
+    usermod -s /usr/sbin/nologin "$u" >/dev/null 2>&1 || usermod -s /sbin/nologin "$u" >/dev/null 2>&1 || true
+  done
+  ui_ok "已锁定异常 UID=0 账户并设置 nologin shell（未改 UID）。"
+  return 0
+}
+
+fix_sudo_nopasswd() {
+  local f
+  for f in /etc/sudoers /etc/sudoers.d/*; do
+    [ -e "$f" ] || continue
+    backup_file "$f"
+    # 将 NOPASSWD 替换成 PASSWD（不破坏其余规则结构）
+    sed -i -E 's/NOPASSWD:/PASSWD:/g' "$f" 2>/dev/null || true
+  done
+  ui_ok "sudo NOPASSWD 已尝试移除（替换为 PASSWD）。"
+  return 0
+}
+
+fix_su_wheel() {
+  # 统一用 wheel 组；没有则创建
+  getent group wheel >/dev/null 2>&1 || groupadd wheel >/dev/null 2>&1 || true
+
+  if [ -f /etc/pam.d/su ]; then
+    backup_file /etc/pam.d/su
+    grep -q 'pam_wheel.so' /etc/pam.d/su 2>/dev/null || \
+      printf "\n# sec-script: restrict su to wheel\nauth           required        pam_wheel.so use_uid group=wheel\n" >>/etc/pam.d/su
+    ui_ok "已配置 su 仅 wheel 组可用（/etc/pam.d/su）。"
+    return 0
+  fi
+
+  # 某些 RHEL 系走 system-auth
+  if [ -f /etc/pam.d/system-auth ]; then
+    backup_file /etc/pam.d/system-auth
+    grep -q 'pam_wheel.so' /etc/pam.d/system-auth 2>/dev/null || \
+      printf "\n# sec-script: restrict su to wheel\nauth        required      pam_wheel.so use_uid group=wheel\n" >>/etc/pam.d/system-auth
+    ui_ok "已配置 su 仅 wheel 组可用（/etc/pam.d/system-auth）。"
+    return 0
+  fi
+
+  ui_warn "未找到可配置的 PAM su 文件，跳过。"
+  return 0
+}
+
+fix_gcc_restrict() {
+  local g real
+  g="$(command -v gcc 2>/dev/null || true)"
+  [ -z "$g" ] && { ui_ok "未安装 gcc，无需处理。"; return 0; }
+  real="$(readlink -f "$g" 2>/dev/null || echo "$g")"
+  backup_file "$real"
+  chmod 700 "$real" 2>/dev/null || { ui_fail "限制 gcc 失败。"; return 1; }
+  ui_ok "gcc 已限制为仅 root 可执行（chmod 700）。"
+  return 0
+}
+
+fix_suid_ext() {
+  [ -e /usr/bin/wall ] && chmod u-s /usr/bin/wall 2>/dev/null || true
+  ui_ok "已移除 /usr/bin/wall 的 SUID（若存在）。"
+  return 0
+}
+
+fix_grub_lock() {
+  [ -f /boot/grub/grub.cfg ] || { ui_ok "未找到 grub.cfg，无需处理。"; return 0; }
+  ensure_chmod 600 /boot/grub/grub.cfg && ui_ok "grub.cfg 权限已加固。"
+  return 0
+}
+
+fix_accept_redirects() {
+  set_kv_eq "$SYSCTL_FILE" "net.ipv4.conf.all.accept_redirects" "0"
+  set_kv_eq "$SYSCTL_FILE" "net.ipv4.conf.default.accept_redirects" "0"
+  sysctl_apply
+  ui_ok "ICMP Redirect 已禁用。"
+  return 0
+}
+
+fix_syncookies() {
+  set_kv_eq "$SYSCTL_FILE" "net.ipv4.tcp_syncookies" "1"
+  sysctl_apply
+  ui_ok "SYN Cookies 已启用。"
+  return 0
+}
+
+fix_log_martians() {
+  set_kv_eq "$SYSCTL_FILE" "net.ipv4.conf.all.log_martians" "1"
+  set_kv_eq "$SYSCTL_FILE" "net.ipv4.conf.default.log_martians" "1"
+  sysctl_apply
+  ui_ok "log_martians 已启用。"
+  return 0
+}
+
+fix_mod_uncommon() {
+  local f="/etc/modprobe.d/disable-uncommon.conf"
+  backup_file "$f"
+  cat >"$f" <<'EOF'
+# sec-script: disable uncommon network protocols
+install dccp /bin/true
+install sctp /bin/true
+install rds  /bin/true
+install tipc /bin/true
+EOF
+  ui_ok "已写入 disable-uncommon.conf（需要重启/手动卸载模块才完全生效）。"
+  return 0
+}
+
+fix_mod_fs() {
+  local f="/etc/modprobe.d/disable-filesystems.conf"
+  backup_file "$f"
+  cat >"$f" <<'EOF'
+# sec-script: disable uncommon filesystems
+install cramfs /bin/true
+install freevxfs /bin/true
+install jffs2 /bin/true
+install hfs /bin/true
+install hfsplus /bin/true
+install squashfs /bin/true
+install udf /bin/true
+EOF
+  ui_ok "已写入 disable-filesystems.conf（可能影响挂载某些文件系统）。"
+  return 0
+}
+
+fix_time_sync() {
+  if has_cmd systemctl && systemctl list-unit-files 2>/dev/null | grep -q '^systemd-timesyncd\.service'; then
+    systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+    systemctl is-active --quiet systemd-timesyncd 2>/dev/null && { ui_ok "已启用 systemd-timesyncd。"; return 0; }
+  fi
+
+  smart_install chrony || true
+  if has_cmd systemctl; then
+    systemctl enable --now chrony  >/dev/null 2>&1 || true
+    systemctl enable --now chronyd >/dev/null 2>&1 || true
+    (systemctl is-active --quiet chrony 2>/dev/null || systemctl is-active --quiet chronyd 2>/dev/null) \
+      && ui_ok "已启用 chrony/chronyd。" \
+      || ui_warn "已尝试安装/启用时间同步，但服务未处于 active。"
+  else
+    ui_warn "无 systemctl，跳过自动启用时间同步服务。"
+  fi
+  return 0
+}
+
+fix_journal_limit() {
+  local f="/etc/systemd/journald.conf"
+  backup_file "$f"
+  touch "$f" 2>/dev/null || true
+  if grep -qE '^[[:space:]]*SystemMaxUse=' "$f" 2>/dev/null; then
+    sed -i -E 's#^[[:space:]]*SystemMaxUse=.*#SystemMaxUse=500M#' "$f"
+  else
+    printf "\nSystemMaxUse=500M\n" >>"$f"
+  fi
+  if has_cmd systemctl; then
+    systemctl restart systemd-journald >/dev/null 2>&1 || true
+  fi
+  ui_ok "journald 磁盘上限已设置为 500M。"
+  return 0
+}
+
+fix_fail2ban() {
+  smart_install fail2ban || return 1
+  if has_cmd systemctl; then
+    systemctl enable --now fail2ban >/dev/null 2>&1 || true
+  fi
+  ui_ok "fail2ban 已安装/尝试启用（请按业务调整 jail 配置）。"
+  return 0
+}
+
+fix_auto_update() {
+  if [ "$PM" = "apt" ]; then
+    smart_install unattended-upgrades apt-listchanges || true
+    local f="/etc/apt/apt.conf.d/20auto-upgrades"
+    backup_file "$f"
+    cat >"$f" <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+    ui_ok "已启用 unattended-upgrades（自动更新）。"
+    return 0
+  fi
+
+  if [ "$PM" = "dnf" ] || [ "$PM" = "yum" ]; then
+    smart_install dnf-automatic || true
+    if has_cmd systemctl; then
+      systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 || true
+    fi
+    ui_ok "已尝试启用 dnf-automatic.timer（自动更新）。"
+    return 0
+  fi
+
+  ui_warn "未识别到可用的自动更新机制，跳过。"
+  return 0
+}
+
+# =========================
+# 初始化项目列表
+# =========================
+init_items() {
+  add_item "启用 BBR" \
+    "提升 TCP 拥塞控制性能" \
+    "部分内核不支持/需重启后生效" \
+    chk_bbr fix_bbr FALSE
+
+  add_item "提升 nofile 限制" \
+    "减少高并发句柄不足导致的崩溃" \
+    "过高值可能掩盖应用资源泄漏" \
+    chk_limits fix_limits FALSE
+
+  add_item "IPv4 优先（gai.conf）" \
+    "避免 IPv6 不通导致的卡顿" \
+    "纯 IPv6 环境可能不适合" \
+    chk_ipv4_pref fix_ipv4_pref FALSE
+
+  add_item "低内存自动加 Swap(1G)" \
+    "降低 OOM 风险" \
+    "磁盘 IO 增加；极小盘注意空间" \
+    chk_swap fix_swap FALSE
+
+  add_item "安装常用运维工具" \
+    "增强排障能力（curl/vim/unzip/htop/git...）" \
+    "最小化系统可能不希望安装额外包" \
+    chk_tools fix_tools FALSE
+
+  add_item "DNS 自愈（仅解析异常时）" \
+    "DNS 坏了自动恢复解析；修复时尽量选就近 DNS" \
+    "企业内网 DNS 场景需谨慎（NM 不会强写）" \
+    chk_dns_ok fix_dns FALSE
+
+  add_item "SSH: 强制 Protocol 2" \
+    "基础安全基线" \
+    "极老旧客户端可能不兼容" \
+    chk_ssh_proto2 fix_ssh_proto2 FALSE
+
+  add_item "SSH: 启用公钥认证" \
+    "支持更安全的登录方式" \
+    "需配合用户侧上传公钥" \
+    chk_ssh_pubkey fix_ssh_pubkey FALSE
+
+  add_item "SSH: 禁止空密码" \
+    "阻断弱口令场景" \
+    "无" \
+    chk_ssh_empty_pw fix_ssh_empty_pw FALSE
+
+  add_item "SSH: 修改端口" \
+    "降低被扫概率" \
+    "云安全组/防火墙未放行会断连" \
+    chk_ssh_port fix_ssh_port TRUE
+
+  add_item "SSH: 禁用密码登录" \
+    "显著降低爆破风险" \
+    "未配置公钥会锁死（脚本会拦截）" \
+    chk_ssh_pw_auth_disabled fix_ssh_pw_auth_off TRUE
+
+  add_item "SSH: 空闲超时(600s)" \
+    "降低被劫持会话风险" \
+    "长时间操作可能被断开" \
+    chk_ssh_idle fix_ssh_idle TRUE
+
+  add_item "SSH: 禁止 Root 登录" \
+    "减少 root 暴露面" \
+    "未配置公钥/替代账户会锁死（脚本会拦截）" \
+    chk_ssh_root_disabled fix_ssh_root_off TRUE
+
+  add_item "SSH: 配置 Banner" \
+    "增加合法使用告知" \
+    "无" \
+    chk_ssh_banner fix_ssh_banner FALSE
+
+  add_item "SSH: 禁止 PermitUserEnvironment" \
+    "减少环境注入风险" \
+    "少数依赖环境注入的场景需调整" \
+    chk_ssh_env fix_ssh_env FALSE
+
+  add_item "PAM: 密码强度(minlen=10)" \
+    "提升口令复杂度基线" \
+    "可能影响改密策略/合规要求" \
+    chk_pass_policy fix_pass_policy FALSE
+
+  add_item "登录策略: PASS_MIN_DAYS=7" \
+    "减少频繁改密绕过" \
+    "部分业务账号策略需例外" \
+    chk_pass_min_days fix_pass_min_days FALSE
+
+  add_item "会话策略: TMOUT=600" \
+    "减少无人值守终端风险" \
+    "长时间无输入会自动退出" \
+    chk_tmout fix_tmout FALSE
+
+  add_item "权限: /etc/passwd=644" \
+    "恢复基线权限" \
+    "无" \
+    chk_mode_passwd fix_mode_passwd FALSE
+
+  add_item "权限: /etc/shadow=600" \
+    "保护口令哈希" \
+    "无" \
+    chk_mode_shadow fix_mode_shadow FALSE
+
+  add_item "权限: sshd_config=600" \
+    "降低配置被非特权读取/篡改风险" \
+    "极少数审计工具需读文件" \
+    chk_mode_sshd fix_mode_sshd FALSE
+
+  add_item "权限: root authorized_keys=600" \
+    "保护 root 公钥文件" \
+    "无" \
+    chk_mode_authkeys fix_mode_authkeys FALSE
+
+  add_item "移除部分基础 SUID" \
+    "降低本地提权面" \
+    "可能影响普通用户 mount/换壳等功能" \
+    chk_suid_basic fix_suid_basic TRUE
+
+  add_item "锁定异常 UID=0 账户" \
+    "消除影子 root 账户风险" \
+    "若为业务强依赖账户会影响业务" \
+    chk_uid0_clean fix_uid0_clean TRUE
+
+  add_item "移除 sudo NOPASSWD" \
+    "提升提权可审计性" \
+    "自动化/运维流程可能需要调整" \
+    chk_sudo_nopasswd fix_sudo_nopasswd TRUE
+
+  add_item "限制 su 仅 wheel 组可用" \
+    "减少横向提权" \
+    "可能影响现有运维习惯/流程" \
+    chk_su_wheel fix_su_wheel TRUE
+
+  add_item "限制 gcc 仅 root 可执行" \
+    "降低编译工具被滥用" \
+    "会影响开发/编译环境" \
+    chk_gcc_restrict fix_gcc_restrict TRUE
+
+  add_item "移除 wall 的 SUID" \
+    "降低提权面" \
+    "影响 wall 使用" \
+    chk_suid_ext fix_suid_ext TRUE
+
+  add_item "GRUB 配置权限加固" \
+    "降低引导配置被篡改风险" \
+    "无" \
+    chk_grub_lock fix_grub_lock FALSE
+
+  add_item "sysctl: 禁用 ICMP Redirect" \
+    "降低被路由注入风险" \
+    "特殊路由环境需评估" \
+    chk_accept_redirects fix_accept_redirects FALSE
+
+  add_item "sysctl: 启用 SYN Cookies" \
+    "缓解 SYN Flood" \
+    "无" \
+    chk_syncookies fix_syncookies FALSE
+
+  add_item "sysctl: 启用 log_martians" \
+    "增强异常包审计" \
+    "日志量可能增加" \
+    chk_log_martians fix_log_martians FALSE
+
+  add_item "禁用少用网络协议模块" \
+    "降低攻击面" \
+    "依赖这些协议的业务会受影响" \
+    chk_mod_uncommon fix_mod_uncommon TRUE
+
+  add_item "禁用少用文件系统模块" \
+    "降低攻击面" \
+    "挂载某些 FS 会失败" \
+    chk_mod_fs fix_mod_fs TRUE
+
+  add_item "启用时间同步" \
+    "减少时间漂移导致的认证/日志问题" \
+    "极少数离线环境需自定义" \
+    chk_time_sync fix_time_sync FALSE
+
+  add_item "journald 限制磁盘占用(500M)" \
+    "防止日志挤爆磁盘" \
+    "回溯历史日志范围变小" \
+    chk_journal_limit fix_journal_limit FALSE
+
+  add_item "安装 fail2ban" \
+    "降低暴力破解风险" \
+    "误封风险；需按业务调 jail" \
+    chk_fail2ban fix_fail2ban TRUE
+
+  add_item "启用自动更新" \
+    "自动修复安全漏洞" \
+    "可能引入升级变更/需维护窗口" \
+    chk_auto_update fix_auto_update TRUE
+}
+
+# =========================
+# 菜单选择逻辑：更直观 + 风险项二次确认
+# =========================
+SHOW_DETAILS=0
+
+emit_range() {
+  local a="$1" b="$2"
+  if has_cmd seq; then
+    if [ "$a" -le "$b" ]; then seq "$a" "$b"; else seq "$b" "$a"; fi
+    return 0
+  fi
+  if [ "$a" -le "$b" ]; then
+    while [ "$a" -le "$b" ]; do echo "$a"; a=$((a+1)); done
+  else
+    while [ "$b" -le "$a" ]; do echo "$b"; b=$((b+1)); done
+  fi
+}
+
+flip_id() {
+  local n="$1"
+  [ "$n" -ge 1 ] && [ "$n" -le "$COUNT" ] || return 0
+  if [ "${SELECTED[$n]}" = "TRUE" ]; then SELECTED[$n]="FALSE"; else SELECTED[$n]="TRUE"; fi
+}
+
+set_id() {
+  local n="$1" v="$2"
+  [ "$n" -ge 1 ] && [ "$n" -le "$COUNT" ] || return 0
+  SELECTED[$n]="$v"
+}
+
+parse_ids_to_list() {
+  local s="$*"
+  s="$(printf "%s" "$s" | tr ',' ' ')"
+  for tok in $s; do
+    if printf "%s" "$tok" | grep -qE '^[0-9]+-[0-9]+$'; then
+      local a b
+      a="$(printf "%s" "$tok" | cut -d- -f1)"
+      b="$(printf "%s" "$tok" | cut -d- -f2)"
+      emit_range "$a" "$b"
+    elif printf "%s" "$tok" | grep -qE '^[0-9]+$'; then
+      echo "$tok"
+    fi
+  done | awk 'NF{print $1}' | awk '!seen[$0]++'
+}
+
+set_defaults() {
+  local i
+  for ((i=1; i<=COUNT; i++)); do
+    if [ "${STATUS[$i]}" = "PASS" ]; then
+      SELECTED[$i]="FALSE"
+    else
+      if [ "${IS_RISKY[$i]}" = "TRUE" ]; then
+        SELECTED[$i]="FALSE"
+      else
+        SELECTED[$i]="TRUE"
+      fi
+    fi
+  done
+}
+
+select_all_safe() {
+  local i
+  for ((i=1; i<=COUNT; i++)); do
+    [ "${IS_RISKY[$i]}" = "TRUE" ] && continue
+    SELECTED[$i]="TRUE"
+  done
+}
+
+select_all_including_risky() {
+  local i
+  for ((i=1; i<=COUNT; i++)); do
+    SELECTED[$i]="TRUE"
+  done
+}
+
+deselect_all() {
+  local i
+  for ((i=1; i<=COUNT; i++)); do
+    SELECTED[$i]="FALSE"
+  done
+}
+
+selected_summary() {
+  local i out=""
+  for ((i=1; i<=COUNT; i++)); do
+    [ "${SELECTED[$i]}" = "TRUE" ] || continue
+    out="${out}${i},"
+  done
+  printf "%s" "${out%,}"
+}
+
+has_selected_risky() {
+  local i
+  for ((i=1; i<=COUNT; i++)); do
+    [ "${SELECTED[$i]}" = "TRUE" ] || continue
+    [ "${IS_RISKY[$i]}" = "TRUE" ] && return 0
+  done
+  return 1
+}
+
+confirm_risky_global() {
+  has_selected_risky || return 0
+  echo -e "${YELLOW}${I_INFO} 你已选择【风险项】。这些操作可能导致：SSH 断连/业务受限/系统行为变化。${RESET}"
+  echo -e "${YELLOW}${I_INFO} 风险项列表：${RESET}"
+  local i
+  for ((i=1; i<=COUNT; i++)); do
+    [ "${SELECTED[$i]}" = "TRUE" ] || continue
+    [ "${IS_RISKY[$i]}" = "TRUE" ] || continue
+    echo -e "  - ${RED}${i}.${RESET} ${TITLES[$i]}  ${GREY}[优点:${PROS[$i]}] [风险:${RISKS[$i]}]${RESET}"
+  done
+  echo -ne "${RED}继续执行所有已选项目? 输入 yes 继续: ${RESET}"
+  local c; read -r c || true
+  [ "$c" = "yes" ] || return 1
+  return 0
+}
+
+confirm_risky_per_item() {
+  local idx="$1"
+  [ "${IS_RISKY[$idx]}" = "TRUE" ] || return 0
+  echo -e "${YELLOW}${I_INFO} 风险项二次确认：${RESET}${BOLD}${TITLES[$idx]}${RESET}"
+  echo -e "  优点: ${PROS[$idx]}"
+  echo -e "  风险: ${RISKS[$idx]}"
+  echo -ne "${RED}执行该风险项? 输入 yes 执行(其他任意输入=跳过): ${RESET}"
+  local c; read -r c || true
+  [ "$c" = "yes" ] || return 1
+  return 0
+}
+
+# =========================
+# 主流程
+# =========================
+init_network_insight
+init_items
+set_defaults
+
+while true; do
+  do_clear
+  echo -e "$NET_BANNER"
+  echo "${BLUE}================================================================================${RESET}"
+  if [ "$REMOTE_SESSION" -eq 1 ]; then
+    echo -e "${YELLOW}${I_INFO} 当前为远程 SSH 会话：风险项务必谨慎（会触发二次确认）。${RESET}"
+  else
+    echo -e "${GREY}${I_INFO} 当前为本地会话。${RESET}"
+  fi
+  echo "${BOLD} ID | 选择 | 状态 | 名称${RESET}"
+  echo "${BLUE}--------------------------------------------------------------------------------${RESET}"
+
+  for ((i=1; i<=COUNT; i++)); do
+    local_sel="${GREY}[OFF]${RESET}"
+    [ "${SELECTED[$i]}" = "TRUE" ] && local_sel="${GREEN}[ ON]${RESET}"
+
+    local_stat="${GREEN}${I_OK}${RESET}"
+    [ "${STATUS[$i]}" = "FAIL" ] && local_stat="${RED}${I_FAIL}${RESET}"
+
+    local_risk=""
+    [ "${IS_RISKY[$i]}" = "TRUE" ] && local_risk="${YELLOW}(风险)${RESET}"
+
+    if [ "$SHOW_DETAILS" -eq 1 ]; then
+      printf "${GREY}%2d.${RESET} %b %b %-28s %b\n" "$i" "$local_sel" "$local_stat" "${TITLES[$i]}" "$local_risk"
+      printf "     ${GREY}优点:%s  风险:%s${RESET}\n" "${PROS[$i]}" "${RISKS[$i]}"
+    else
+      printf "${GREY}%2d.${RESET} %b %b %-35s %b\n" "$i" "$local_sel" "$local_stat" "${TITLES[$i]}" "$local_risk"
+    fi
+  done
+
+  echo "${BLUE}================================================================================${RESET}"
+  SUM_IDS="$(selected_summary)"
+  [ -z "$SUM_IDS" ] && SUM_IDS="(空)"
+  echo -e "${I_LIST} 待执行清单: ${GREEN}${SUM_IDS}${RESET}"
+  [ -n "$MSG" ] && { echo -e "${YELLOW}${I_INFO} $MSG${RESET}"; MSG=""; }
+
+  echo -e "${GREY}指令: r=开始 | q=退出 | d=详情开关 | default | all(仅非风险) | all!(含风险) | none | on/off <id...> | 输入ID/范围翻转${RESET}"
+  echo -ne "输入: "
+  read -r ri || true
+
+  case "$ri" in
+    q|Q)
+      trap - EXIT
+      exit 0
+      ;;
+    d|D)
+      if [ "$SHOW_DETAILS" -eq 1 ]; then SHOW_DETAILS=0; else SHOW_DETAILS=1; fi
+      ;;
+    default|DEFAULT)
+      set_defaults
+      ;;
+    all|ALL)
+      select_all_safe
+      ;;
+    all\!|ALL\!)
+      select_all_including_risky
+      ;;
+    none|NONE)
+      deselect_all
+      ;;
+    on\ *|ON\ *)
+      ids="${ri#* }"
+      while read -r n; do set_id "$n" "TRUE"; done < <(parse_ids_to_list "$ids")
+      ;;
+    off\ *|OFF\ *)
+      ids="${ri#* }"
+      while read -r n; do set_id "$n" "FALSE"; done < <(parse_ids_to_list "$ids")
+      ;;
+    r|R|run|RUN)
+      SUM_IDS="$(selected_summary)"
+      [ -z "$SUM_IDS" ] && { MSG="请先选择要执行的项。"; continue; }
+
+      check_space || continue
+      heal_environment || continue
+      backup_prune
+
+      confirm_risky_global || { MSG="已取消执行。"; continue; }
+
+      for ((i=1; i<=COUNT; i++)); do
+        [ "${SELECTED[$i]}" = "TRUE" ] || continue
+
+        if [ "${IS_RISKY[$i]}" = "TRUE" ]; then
+          confirm_risky_per_item "$i" || { ui_warn "已跳过风险项：${TITLES[$i]}"; continue; }
+        fi
+
+        echo -e "   ${CYAN}${I_FIX} 加固中: ${TITLES[$i]} ...${RESET}"
+        "${APPLY_FN[$i]}" || true
+      done
+
+      # SSH：最后统一 reload（语法不通过则不 reload）
+      if [ -f "$SSH_MAIN" ] && has_cmd /usr/sbin/sshd; then
+        ssh_reload_safe || true
+      fi
+
+      backup_prune
+      trap - EXIT
+      echo -ne "\n${YELLOW}【重要】流程执行完毕。按任意键退出...${RESET}"
+      read -n 1 -s -r || true
+      exit 0
+      ;;
+    *)
+      while read -r n; do flip_id "$n"; done < <(parse_ids_to_list "$ri")
+      ;;
+  esac
+done
