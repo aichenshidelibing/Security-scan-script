@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
 # v0.sh - Linux 全维安全审计系统 (v3.0 完美镜像版)
-# 特性：36项全量对齐v1 | 硬件仪表盘 | 可视化评分 | 防闪退 | 进度条
+# 特性：安全精简审计 | 硬件仪表盘 | 可视化评分 | 防闪退 | 进度条
 
 export LC_ALL=C
 
@@ -74,7 +74,7 @@ get_sys_info() {
     echo ""
 }
 
-# --- 2. 审计规则定义 (36项全量对齐 v1.sh v32.1) ---
+# --- 2. 审计规则定义 (安全精简版，对齐 v1.sh) ---
 declare -a CAT TITLES DESC SUGGEST LEVEL STATUS
 COUNT=0
 SCORE=100
@@ -98,61 +98,46 @@ add_audit() {
 }
 
 # 辅助检测函数
-CUR_P=$(grep -E "^[[:space:]]*Port" /etc/ssh/sshd_config | awk '{print $2}' | tail -n 1); CUR_P=${CUR_P:-22}
-check_gcc() { local g=$(command -v gcc); [ -z "$g" ] || [ "$(stat -c %a "$(readlink -f "$g")")" == "700" ]; }
-is_eol() { if [ -f /etc/os-release ]; then . /etc/os-release; [[ "$ID" == "debian" && "$VERSION_ID" -lt 10 ]] && return 0; [[ "$ID" == "ubuntu" && "${VERSION_ID%%.*}" -lt 16 ]] && return 0; [[ "$ID" == "centos" && "$VERSION_ID" -lt 7 ]] && return 0; fi; return 1; }
+SSHD_CONFIG="/etc/ssh/sshd_config"
+if [ -f "$SSHD_CONFIG" ]; then
+    CUR_P=$(grep -E "^[[:space:]]*Port" "$SSHD_CONFIG" | awk '{print $2}' | tail -n 1)
+else
+    CUR_P=22
+fi
+CUR_P=${CUR_P:-22}
+has_sshd_config() { [ -f "$SSHD_CONFIG" ]; }
+bbr_available() { sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; }
 
 # [核心修复] 函数名统一为 init_audit，确保与调用一致
 init_audit() {
-    # 1. 基础优化 (3项)
-    add_audit "基础" "TCP BBR" "检测 BBR 加速" "建议开启以提升网速" "low" "sysctl net.ipv4.tcp_congestion_control | grep -q bbr"
+    # 1. 基础优化
+    add_audit "基础" "TCP BBR" "检测 BBR 加速" "内核支持时可开启以改善部分网络场景" "low" "bbr_available && sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -qw bbr"
     add_audit "基础" "必备软件" "检测 curl/wget/vim 等" "建议安装常用工具" "info" "command -v vim >/dev/null && command -v htop >/dev/null"
-    add_audit "基础" "DNS设置" "检测公共 DNS" "建议使用 8.8.8.8 或 223.5.5.5" "info" "grep -q '8.8.8.8' /etc/resolv.conf || grep -q '223.5.5.5' /etc/resolv.conf"
 
-    # 2. SSH 安全 (9项)
-    add_audit "SSH" "协议版本" "检测 Protocol 2" "必须强制使用 V2 协议" "high" "grep -q '^Protocol 2' /etc/ssh/sshd_config"
-    add_audit "SSH" "公钥认证" "检测 Pubkey" "建议开启密钥登录" "info" "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config"
-    add_audit "SSH" "空密码" "检测 EmptyPasswords" "必须禁止空密码" "high" "grep -q '^PermitEmptyPasswords no' /etc/ssh/sshd_config"
-    add_audit "SSH" "默认端口" "检测 Port 22" "建议修改高位端口" "mid" "[ \"$CUR_P\" != \"22\" ]"
-    add_audit "SSH" "密码认证" "检测 PasswordAuth" "建议关闭密码认证" "mid" "grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config"
-    add_audit "SSH" "连接超时" "检测 ClientAlive" "建议设置 600s 超时" "low" "grep -q '^ClientAliveInterval 600' /etc/ssh/sshd_config"
-    add_audit "SSH" "Root登录" "检测 RootLogin" "建议禁止 Root 登录" "high" "grep -q '^PermitRootLogin no' /etc/ssh/sshd_config"
-    add_audit "SSH" "登录警告" "检测 Banner" "建议设置警告标语" "info" "grep -q '^Banner' /etc/ssh/sshd_config"
-    add_audit "SSH" "环境篡改" "检测 UserEnvironment" "必须禁止环境篡改" "mid" "grep -q '^PermitUserEnvironment no' /etc/ssh/sshd_config"
+    # 2. SSH 安全（低锁死风险项）
+    add_audit "SSH" "公钥认证" "检测 Pubkey" "建议开启密钥登录" "info" "has_sshd_config && grep -q '^PubkeyAuthentication yes' \"$SSHD_CONFIG\""
+    add_audit "SSH" "空密码" "检测 EmptyPasswords" "必须禁止空密码" "high" "has_sshd_config && grep -q '^PermitEmptyPasswords no' \"$SSHD_CONFIG\""
+    add_audit "SSH" "连接超时" "检测 ClientAlive" "建议设置 600s 超时" "low" "has_sshd_config && grep -q '^ClientAliveInterval 600' \"$SSHD_CONFIG\""
+    add_audit "SSH" "登录警告" "检测 Banner" "建议设置警告标语" "info" "has_sshd_config && grep -q '^Banner' \"$SSHD_CONFIG\""
+    add_audit "SSH" "环境篡改" "检测 UserEnvironment" "必须禁止环境篡改" "mid" "has_sshd_config && grep -q '^PermitUserEnvironment no' \"$SSHD_CONFIG\""
 
-    # 3. 账户安全 (3项)
-    add_audit "账户" "密码强度" "检测 minlen=10" "建议强制 10 位混合密码" "mid" "grep -q 'minlen=10' /etc/pam.d/common-password 2>/dev/null || grep -q 'minlen=10' /etc/pam.d/system-auth 2>/dev/null"
-    add_audit "账户" "修改间隔" "检测 PASS_MIN_DAYS" "建议设置 7 天最小间隔" "low" "grep -q 'PASS_MIN_DAYS[[:space:]]*7' /etc/login.defs"
-    add_audit "账户" "自动注销" "检测 Shell TMOUT" "建议设置终端 600s 超时" "low" "grep -q 'TMOUT=600' /etc/profile"
-
+    
     # 4. 权限与文件 (5项)
     add_audit "权限" "Passwd" "检测 passwd 644" "权限应为 644" "high" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]"
     add_audit "权限" "Shadow" "检测 shadow 600" "权限应为 600" "high" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]"
-    add_audit "权限" "SSH配置" "检测 sshd_config 600" "权限应为 600" "high" "[ \"\$(stat -c %a /etc/ssh/sshd_config)\" == \"600\" ]"
+    add_audit "权限" "SSH配置" "检测 sshd_config 600" "权限应为 600" "high" "has_sshd_config && [ \"$(stat -c %a \\\"$SSHD_CONFIG\\\")\" == \"600\" ]"
     add_audit "权限" "AuthKeys" "检测 authorized_keys 600" "权限应为 600" "high" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]"
-    add_audit "权限" "SUID清理" "检测 ping/mount" "建议移除不必要的 SUID" "low" "[ ! -u /bin/mount ]"
 
-    # 5. 限制与加固 (6项)
-    add_audit "限制" "异常Root" "检测 UID=0 非Root" "必须清理后门账户" "high" "[ -z \"\$(awk -F: '(\$3 == 0 && \$1 != \"root\"){print \$1}' /etc/passwd)\" ]"
-    add_audit "限制" "Sudo免密" "检测 NOPASSWD" "禁止 sudo 免密" "high" "! grep -r 'NOPASSWD' /etc/sudoers /etc/sudoers.d >/dev/null 2>&1"
-    add_audit "限制" "Su Wheel" "检测 su 组" "建议只允许 wheel 组切 Root" "mid" "grep -q 'pam_wheel.so' /etc/pam.d/su || grep -q 'pam_wheel.so' /etc/pam.d/system-auth"
-    add_audit "限制" "编译器" "检测 gcc 权限" "建议限制 gcc 为 700" "mid" "check_gcc"
-    add_audit "限制" "扩展SUID" "检测 wall/chage" "建议移除扩展 SUID" "low" "[ ! -u /usr/bin/wall ]"
-    add_audit "限制" "Bootloader" "检测 grub.cfg" "建议权限设为 600" "low" "[ \"\$(stat -c %a /boot/grub/grub.cfg 2>/dev/null)\" == \"600\" ]"
-
-    # 6. 内核防御 (5项)
+    
+    # 6. 内核防御
     add_audit "内核" "ICMP重定向" "检测 accept_redirects" "建议禁用防攻击" "mid" "sysctl net.ipv4.conf.all.accept_redirects 2>/dev/null | grep -q '= 0'"
     add_audit "内核" "SYN Cookie" "检测 tcp_syncookies" "建议开启防 DDoS" "mid" "sysctl -n net.ipv4.tcp_syncookies 2>/dev/null | grep -q '1'"
-    add_audit "内核" "高危协议" "检测 dccp/sctp" "建议禁用不常用协议" "low" "[ -f /etc/modprobe.d/disable-uncommon.conf ]"
-    add_audit "内核" "文件系统" "检测 JFFS2/UDF" "建议禁用生僻文件系统" "low" "[ -f /etc/modprobe.d/disable-filesystems.conf ]"
     add_audit "内核" "恶意包日志" "检测 log_martians" "建议开启恶意包记录" "low" "sysctl net.ipv4.conf.all.log_martians 2>/dev/null | grep -q '= 1'"
 
-    # 7. 审计与更新 (5项)
+    # 7. 审计与更新
     add_audit "审计" "时间同步" "检测 Chrony/NTP" "必须保证日志时间准确" "mid" "command -v chronyd >/dev/null || systemctl is-active --quiet systemd-timesyncd"
     add_audit "审计" "日志轮转" "检测 Journald MaxUse" "建议限制日志大小" "low" "grep -q '^SystemMaxUse=500M' /etc/systemd/journald.conf"
     add_audit "防御" "Fail2ban" "检测 Fail2ban" "强烈建议安装防爆破" "high" "command -v fail2ban-server >/dev/null"
-    add_audit "更新" "自动更新" "检测 自动更新服务" "建议开启每日自动补丁" "mid" "command -v unattended-upgrades >/dev/null || systemctl is-active --quiet dnf-automatic.timer"
-    add_audit "更新" "漏洞补丁" "检测 dpkg 版本" "建议升级到安全版本" "high" "! is_eol && { dpkg --compare-versions \$(dpkg-query -f='\${Version}' -W dpkg 2>/dev/null || echo 0) ge 1.20.10; }"
 }
 
 # --- 3. 打印报告逻辑 ---

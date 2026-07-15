@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# install.sh - Linux 安全工具箱主控台 (v3.1 稳定修复版)
-# 特性：修复变量缺失报错 | 系统仪表盘 | 细化下载中心 | 极致兼容
+# install.sh - Linux 安全工具箱主控台 (v3.2 稳定增强版)
+# 特性：安全下载校验 | 本地自检 | 系统仪表盘 | 细化下载中心 | 极致兼容
 
 export LC_ALL=C
 
@@ -28,10 +28,10 @@ detect_env() {
     # 3. 图标定义
     if [ "$USE_EMOJI" == "1" ]; then
         I_MAIN="🛡️ "; I_OK="✅"; I_WARN="⚠️ "; I_FAIL="❌"; I_INFO="ℹ️ "
-        I_DL="⬇️ "; I_SET="⚙️ "; I_SYS="🖥️ "; I_EXIT="🚪"
+        I_DL="⬇️ "; I_SET="⚙️ "; I_SYS="🖥️ "; I_EXIT="🚪"; I_CHECK="🧪"
     else
         I_MAIN="[*]"; I_OK="[OK]"; I_WARN="[!]"; I_FAIL="[X]"; I_INFO="[i]"
-        I_DL="[DL]"; I_SET="[ST]"; I_SYS="[SYS]"; I_EXIT="[Q]"
+        I_DL="[DL]"; I_SET="[ST]"; I_SYS="[SYS]"; I_EXIT="[Q]"; I_CHECK="[CK]"
     fi
 }
 detect_env
@@ -52,7 +52,7 @@ show_dashboard() {
     local user_now=$(whoami)
 
     ui_header
-    echo -e "${BOLD}${CYAN}           ${I_MAIN} Linux Security Toolbox v3.1 (终极主控台) ${RESET}"
+    echo -e "${BOLD}${CYAN}           ${I_MAIN} Linux Security Toolbox v3.2 (稳定增强版) ${RESET}"
     ui_header
     printf "  ${I_SYS} 系统: ${WHITE}%-30s ${GREY} IP: ${WHITE}%-15s${RESET}\n" "${os_info:0:30}" "$ip_addr"
     printf "  ${GREY}⏰ 时间: ${WHITE}%-30s ${GREY} 用户: ${WHITE}%-15s${RESET}\n" "$time_now" "$user_now"
@@ -85,6 +85,41 @@ download_script() {
     fi
 }
 
+# --- 本地自检：语法与基础完整性 ---
+self_check() {
+    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh"
+    local failed=0
+
+    echo ""
+    echo -e "${BOLD}${I_CHECK} 本地自检 / 语法检查${RESET}"
+    ui_line
+    for script in $scripts; do
+        if [ ! -f "$script" ]; then
+            echo -e "${YELLOW}${I_WARN} $script 不存在，跳过。${RESET}"
+            continue
+        fi
+
+        echo -ne "${CYAN}检查 $script ... ${RESET}"
+        if bash -n "$script" 2>/tmp/sec_toolbox_check.err; then
+            echo -e "${GREEN}通过${RESET}"
+        else
+            echo -e "${RED}失败${RESET}"
+            sed 's/^/    /' /tmp/sec_toolbox_check.err
+            failed=1
+        fi
+    done
+    rm -f /tmp/sec_toolbox_check.err
+    ui_line
+
+    if [ "$failed" -eq 0 ]; then
+        ui_ok "自检完成，未发现 Bash 语法错误。"
+    else
+        ui_fail "发现语法错误，请先修复后再运行加固功能。"
+    fi
+    echo -ne "${YELLOW}${I_INFO} 按任意键返回主菜单...${RESET}"
+    read -n 1 -s -r
+}
+
 # --- 子菜单：下载管理 ---
 menu_download() {
     while true; do
@@ -115,11 +150,27 @@ menu_download() {
 cleanup_scripts() {
     echo ""
     echo -e "${YELLOW}${I_WARN} 即将通过特征码扫描并清理本工具箱的所有子脚本...${RESET}"
-    local files=$(grep -l "$TAG_MARKER" *.sh 2>/dev/null | grep -v "$(basename "$0")")
-    if [ -n "$files" ]; then
-        echo -e "${WHITE}发现待删文件: ${YELLOW}$files${RESET}"
+    local current_script
+    current_script=$(basename "$0")
+    local files=()
+    local f
+
+    for f in *.sh; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$current_script" ] && continue
+        grep -q "$TAG_MARKER" "$f" 2>/dev/null && files+=("$f")
+    done
+
+    if [ "${#files[@]}" -gt 0 ]; then
+        printf "${WHITE}发现待删文件:${RESET}\n"
+        printf "  ${YELLOW}%s${RESET}\n" "${files[@]}"
         read -p "确认清理？(yes/no): " c
-        [ "$c" == "yes" ] && { rm -f $files; ui_ok "清理完成。"; } || echo "已取消。"
+        if [ "$c" == "yes" ]; then
+            rm -f -- "${files[@]}"
+            ui_ok "清理完成。"
+        else
+            echo "已取消。"
+        fi
     else
         echo "未发现可清理脚本。"
     fi
@@ -135,14 +186,15 @@ main_menu() {
         echo -e "${BOLD}工具列表${RESET}"
         ui_line
         printf " [0] %-30s [状态: %s]\n" "全维审计 (v0.sh)" "$(st v0.sh)"
-        echo -e "     ${GREY}└─ 只查不改 / 硬件仪表盘 / 36项深度体检 / 评分报告${RESET}"
-        printf " [1] %-30s [状态: %s]\n" "全能管家 (v1.sh)" "$(st v1.sh)"
-        echo -e "     ${GREY}└─ BBR加速 / 救砖换源 / 批量安装 / 39项加固 / 补丁修复${RESET}"
+        echo -e "     ${GREY}└─ 只查不改 / 硬件仪表盘 / 安全精简审计 / 评分报告${RESET}"
+        printf " [1] %-30s [状态: %s]\n" "基础管家 (v1.sh)" "$(st v1.sh)"
+        echo -e "     ${GREY}└─ BBR加速 / 基础工具 / SSH低风险项 / 权限与日志修复${RESET}"
         printf " [2] %-30s [状态: %s]\n" "密钥配置 (v2.sh)" "$(st v2.sh)"
         echo -e "     ${GREY}└─ 禁用密码登录 / 自动生成密钥对 / 权限自动修正${RESET}"
         printf " [3] %-30s [状态: %s]\n" "网络隐身 (v3.sh)" "$(st v3.sh)"
         echo -e "     ${GREY}└─ 开启或关闭禁 Ping / 隐藏服务器存活状态${RESET}"
         ui_line
+        echo " [7] 本地自检 (检查脚本语法)"
         echo " [8] 智能清理 (清理所有工具脚本)"
         echo " [9] 下载中心 (单独下载或批量更新)"
         echo " [q] 退出主控台"
@@ -155,6 +207,7 @@ main_menu() {
                 local S="v${CHOICE}.sh"
                 if [ -x "$S" ]; then ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;
+            7) self_check ;;
             8) cleanup_scripts ;;
             9) menu_download ;;
             q|Q) echo -e "${CYAN}感谢使用，再见。${RESET}"; exit 0 ;;

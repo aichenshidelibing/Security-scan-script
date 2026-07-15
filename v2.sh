@@ -49,6 +49,12 @@ ui_fail() { echo -e "${RED}${I_FAIL} $*${RESET}"; }
 ui_header() { echo -e "${BLUE}================================================================================${RESET}"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || { ui_fail "请以 root 运行本脚本"; exit 1; }; }
+need_sshd_config() {
+    if [ ! -f "$SSHD_CONFIG" ]; then
+        ui_fail "未找到 $SSHD_CONFIG，请先安装 openssh-server 后再运行。"
+        exit 1
+    fi
+}
 
 # --- 1. 环境检测 ---
 check_status() {
@@ -170,6 +176,7 @@ confirm_and_lock() {
 # --- 3. 主界面 ---
 clear
 need_root
+need_sshd_config
 check_status
 
 ui_header

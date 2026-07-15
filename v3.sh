@@ -45,6 +45,7 @@ FW_TYPE="none"
 ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
 ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
 ui_warn() { echo -e "${YELLOW}${I_WARN} $*${RESET}"; }
+ui_fail() { echo -e "${RED}${I_FAIL} $*${RESET}"; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
 # --- 1. 防火墙自动检测 ---
@@ -57,6 +58,29 @@ detect_firewall() {
 }
 
 # --- 2. 注册项目与审计 ---
+nft_rule_exists() {
+    nft list chain inet sec_toolbox input 2>/dev/null | grep -q 'icmp type echo-request drop' && \
+        nft list chain inet sec_toolbox input 2>/dev/null | grep -q 'icmpv6 type echo-request drop'
+}
+
+ensure_nft_chain() {
+    nft list table inet sec_toolbox >/dev/null 2>&1 || nft add table inet sec_toolbox
+    nft list chain inet sec_toolbox input >/dev/null 2>&1 || \
+        nft add chain inet sec_toolbox input '{ type filter hook input priority 0; policy accept; }'
+}
+
+apply_nft_block() {
+    ensure_nft_chain || return 1
+    nft list chain inet sec_toolbox input 2>/dev/null | grep -q 'icmp type echo-request drop' || \
+        nft add rule inet sec_toolbox input icmp type echo-request drop 2>/dev/null
+    nft list chain inet sec_toolbox input 2>/dev/null | grep -q 'icmpv6 type echo-request drop' || \
+        nft add rule inet sec_toolbox input icmpv6 type echo-request drop 2>/dev/null
+}
+
+apply_nft_allow() {
+    nft delete table inet sec_toolbox 2>/dev/null || true
+}
+
 add_item() {
     COUNT=$((COUNT+1))
     IDS[$COUNT]=$COUNT
@@ -81,7 +105,7 @@ audit_all() {
         firewalld) fw_cmd="firewall-cmd --query-icmp-block=echo-request >/dev/null 2>&1" ;;
         ufw)       fw_cmd="grep -q 'DISABLE_PING' /etc/ufw/before.rules 2>/dev/null" ;;
         iptables)  fw_cmd="iptables -C INPUT -p icmp --icmp-type echo-request -j DROP >/dev/null 2>&1" ;;
-        nftables)  fw_cmd="nft list ruleset | grep -q 'icmp type echo-request .* drop'" ;;
+        nftables)  fw_cmd="nft_rule_exists" ;;
     esac
     
     add_item "防火墙禁 Ping (IPv4/v6)" "全面隐身，包含 IPv6" "属于防火墙规则变更" "$fw_cmd"
@@ -105,7 +129,8 @@ apply_action() {
                     ufw) 
                         [ -f /etc/ufw/before.rules ] && ! grep -q "DISABLE_PING" /etc/ufw/before.rules && sed -i '/ufw-before-input.*-j DROP/i # DISABLE_PING\n-A ufw-before-input -p icmp --icmp-type echo-request -j DROP' /etc/ufw/before.rules
                         ufw reload >/dev/null 2>&1 ;;
-                    iptables) iptables -I INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ;;
+                    nftables) apply_nft_block || ui_fail "nftables 规则应用失败" ;;
+                    iptables) iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -I INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ;;
                 esac ;;
         esac
     else
@@ -117,6 +142,7 @@ apply_action() {
                 case "$FW_TYPE" in
                     firewalld) firewall-cmd --remove-icmp-block=echo-request --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 ;;
                     ufw) sed -i '/DISABLE_PING/,+1d' /etc/ufw/before.rules 2>/dev/null; ufw reload >/dev/null 2>&1 ;;
+                    nftables) apply_nft_allow ;;
                     iptables) while iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null; do :; done ;;
                 esac ;;
         esac
