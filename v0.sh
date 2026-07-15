@@ -106,6 +106,7 @@ else
 fi
 CUR_P=${CUR_P:-22}
 has_sshd_config() { [ -f "$SSHD_CONFIG" ]; }
+sshd_config_perm_secure() { has_sshd_config && [ "$(stat -c %a "$SSHD_CONFIG" 2>/dev/null)" = "600" ]; }
 bbr_available() { sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; }
 
 # [核心修复] 函数名统一为 init_audit，确保与调用一致
@@ -125,7 +126,7 @@ init_audit() {
     # 4. 权限与文件 (5项)
     add_audit "权限" "Passwd" "检测 passwd 644" "权限应为 644" "high" "[ \"\$(stat -c %a /etc/passwd)\" == \"644\" ]"
     add_audit "权限" "Shadow" "检测 shadow 600" "权限应为 600" "high" "[ \"\$(stat -c %a /etc/shadow)\" == \"600\" ]"
-    add_audit "权限" "SSH配置" "检测 sshd_config 600" "权限应为 600" "high" "has_sshd_config && [ \"$(stat -c %a \\\"$SSHD_CONFIG\\\")\" == \"600\" ]"
+    add_audit "权限" "SSH配置" "检测 sshd_config 600" "权限应为 600" "high" "sshd_config_perm_secure"
     add_audit "权限" "AuthKeys" "检测 authorized_keys 600" "权限应为 600" "high" "[ ! -f /root/.ssh/authorized_keys ] || [ \"\$(stat -c %a /root/.ssh/authorized_keys)\" == \"600\" ]"
 
     

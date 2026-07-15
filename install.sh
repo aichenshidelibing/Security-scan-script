@@ -181,7 +181,7 @@ cleanup_scripts() {
 main_menu() {
     while true; do
         show_dashboard
-        st() { [ -x "$1" ] && echo "${GREEN}已就绪${RESET}" || echo "${GREY}未下载${RESET}"; }
+        st() { [ -f "$1" ] && echo "${GREEN}已就绪${RESET}" || echo "${GREY}未下载${RESET}"; }
         
         echo -e "${BOLD}工具列表${RESET}"
         ui_line
@@ -205,7 +205,7 @@ main_menu() {
         case "$CHOICE" in
             [0-3])
                 local S="v${CHOICE}.sh"
-                if [ -x "$S" ]; then ./"$S"
+                if [ -f "$S" ]; then bash ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;
             7) self_check ;;
             8) cleanup_scripts ;;
