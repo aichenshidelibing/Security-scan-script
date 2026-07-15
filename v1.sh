@@ -53,99 +53,233 @@ show_spinner() {
 
 check_space() { [ "$(df / | awk 'NR==2 {print $4}')" -lt 204800 ] && { ui_fail "磁盘不足 200MB，停止。"; return 1; }; return 0; }
 
-# --- [鹰眼] 网络侦测 (启动预加载) ---
+# --- 系统与网络辅助 ---
+OS_ID=""; OS_VERSION_ID=""; OS_CODENAME=""; OS_ID_LIKE=""; APT_UPDATED=0; YUM_CACHED=0
+
+load_os_release() {
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        OS_ID="${ID:-}"
+        OS_VERSION_ID="${VERSION_ID:-}"
+        OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+        OS_ID_LIKE="${ID_LIKE:-}"
+    fi
+}
+
+is_debian_like() { [[ "$OS_ID $OS_ID_LIKE" =~ debian|ubuntu ]]; }
+
+# --- [鹰眼] 网络侦测 (缺工具时降级为未检测) ---
 NET_BANNER=""
 init_network_insight() {
     echo -ne "${CYAN}${I_WAIT} 正在进行网络与防火墙态势感知 (约需 3 秒)...${RESET}"
-    
-    # 1. 内部防火墙
-    local fw_status="${GREEN}已关闭 (推荐)${RESET}"
-    if command -v ufw >/dev/null && ufw status | grep -q "active"; then fw_status="${YELLOW}UFW 运行中${RESET}"; fi
+    local fw_status="${GREEN}未检测到活动防火墙${RESET}"
+    if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "active"; then fw_status="${YELLOW}UFW 运行中${RESET}"; fi
     if command -v firewall-cmd >/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then fw_status="${YELLOW}Firewalld 运行中${RESET}"; fi
     if command -v iptables >/dev/null && [ "$(iptables -L INPUT 2>/dev/null | wc -l)" -gt 10 ]; then fw_status="${YELLOW}Iptables 活跃${RESET}"; fi
 
-    # 2. 出站连通性
-    local net_status=""
-    if ping -c 1 -W 1 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then 
-        net_status="${GREEN}ICMP${RESET}"
-    else 
-        net_status="${RED}ICMP(阻断)${RESET}"
-    fi
-    if curl -s --connect-timeout 2 https://www.baidu.com >/dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com >/dev/null 2>&1; then
-        net_status="$net_status | ${GREEN}TCP${RESET}"
-    else
-        net_status="$net_status | ${RED}TCP(阻断)${RESET}"
-    fi
-    if timeout 2 nslookup google.com 8.8.8.8 >/dev/null 2>&1 || timeout 2 nslookup baidu.com 223.5.5.5 >/dev/null 2>&1; then
-        net_status="$net_status | ${GREEN}UDP${RESET}"
-    else
-        net_status="$net_status | ${RED}UDP(阻断)${RESET}"
-    fi
+    local icmp_status tcp_status dns_status
+    if command -v ping >/dev/null 2>&1; then
+        if ping -c 1 -W 1 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then icmp_status="${GREEN}ICMP${RESET}"; else icmp_status="${RED}ICMP(阻断)${RESET}"; fi
+    else icmp_status="${GREY}ICMP(未检测: 缺少 ping)${RESET}"; fi
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s --connect-timeout 2 https://www.baidu.com >/dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com >/dev/null 2>&1; then tcp_status="${GREEN}TCP${RESET}"; else tcp_status="${RED}TCP(阻断)${RESET}"; fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q --spider --timeout=2 https://www.baidu.com >/dev/null 2>&1 || wget -q --spider --timeout=2 https://www.google.com >/dev/null 2>&1; then tcp_status="${GREEN}TCP${RESET}"; else tcp_status="${RED}TCP(阻断)${RESET}"; fi
+    else tcp_status="${GREY}TCP(未检测: 缺少 curl/wget)${RESET}"; fi
+
+    if command -v nslookup >/dev/null 2>&1; then
+        if timeout 2 nslookup google.com 8.8.8.8 >/dev/null 2>&1 || timeout 2 nslookup baidu.com 223.5.5.5 >/dev/null 2>&1; then dns_status="${GREEN}DNS${RESET}"; else dns_status="${RED}DNS(阻断)${RESET}"; fi
+    else dns_status="${GREY}DNS(未检测: 缺少 nslookup)${RESET}"; fi
 
     NET_BANNER="${BLUE}================================================================================${RESET}\n"
-    NET_BANNER+="${I_WALL} 内部防火墙: [ $fw_status ]   ${I_NET} 出站连通性: [ $net_status ]\n"
-    NET_BANNER+="${GREY}   (提示: 若连通性全红，请检查云厂商控制台的安全组规则)${RESET}"
+    NET_BANNER+="${I_WALL} 内部防火墙: [ $fw_status ]   ${I_NET} 出站: [ $icmp_status | $tcp_status | $dns_status ]\n"
+    NET_BANNER+="${GREY}   (提示: 未检测不等于失败，可先安装基础工具后重新运行)${RESET}"
     echo -e "\r                                                               \r"
 }
 
 # --- 智能锁管理 ---
+lock_busy() {
+    local lock="$1"
+    [ -f "$lock" ] || return 1
+    if command -v fuser >/dev/null 2>&1; then fuser "$lock" >/dev/null 2>&1; else return 0; fi
+}
+
 handle_lock() {
     local locks=("/var/lib/dpkg/lock-frontend" "/var/lib/dpkg/lock" "/var/lib/apt/lists/lock")
-    local locked=""
-    local lock
-
-    for lock in "${locks[@]}"; do
-        if [ -f "$lock" ] && fuser "$lock" >/dev/null 2>&1; then
-            locked="$lock"
-            break
-        fi
-    done
-
+    local locked="" lock
+    for lock in "${locks[@]}"; do if lock_busy "$lock"; then locked="$lock"; break; fi; done
     [ -z "$locked" ] && return 0
-
     ui_warn "检测到包管理器锁: $locked"
-    ui_info "将等待最多 30 秒，避免强行终止 apt/dpkg 造成系统损坏。"
+    command -v fuser >/dev/null 2>&1 || ui_warn "缺少 fuser(psmisc)，无法识别锁持有进程，将仅等待锁文件状态。"
     local count=0
-    while fuser "$locked" >/dev/null 2>&1 && [ "$count" -lt 30 ]; do
-        sleep 1
-        count=$((count+1))
-    done
-
-    if fuser "$locked" >/dev/null 2>&1; then
-        ui_fail "包管理器仍被占用，请稍后重试或手动检查 apt/dpkg 进程。"
-        return 1
-    fi
-
+    while lock_busy "$locked" && [ "$count" -lt 30 ]; do sleep 1; count=$((count+1)); done
+    if lock_busy "$locked"; then ui_fail "包管理器仍被占用，请稍后重试或手动检查 apt/dpkg 进程。"; return 1; fi
     command -v dpkg >/dev/null 2>&1 && dpkg --configure -a >/dev/null 2>&1
+    return 0
+}
+
+# --- APT 源自动优化 ---
+detect_apt_codename() {
+    [ -n "$OS_CODENAME" ] && { echo "$OS_CODENAME"; return 0; }
+    if command -v lsb_release >/dev/null 2>&1; then lsb_release -cs 2>/dev/null && return 0; fi
+    if [ "$OS_ID" = "debian" ] && [ -f /etc/debian_version ]; then
+        case "$(cut -d. -f1 /etc/debian_version)" in 13) echo trixie;; 12) echo bookworm;; 11) echo bullseye;; 10) echo buster;; *) return 1;; esac
+        return 0
+    fi
+    return 1
+}
+
+is_china_network() {
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -s --connect-timeout 2 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q '^loc=CN$'
+}
+
+mirror_time() {
+    local url="$1"
+    if command -v curl >/dev/null 2>&1; then curl -L --connect-timeout 2 --max-time 5 -o /dev/null -w '%{time_total}' "$url" 2>/dev/null || echo 999; else echo 999; fi
+}
+
+pick_fastest_mirror() {
+    local codename="$1" best="" best_time="999" m t rel="dists/${codename}/Release"
+    shift
+    for m in "$@"; do
+        t=$(mirror_time "${m%/}/$rel")
+        awk "BEGIN{exit !($t < $best_time)}" && { best_time="$t"; best="$m"; }
+    done
+    echo "$best"
+}
+
+backup_apt_sources() {
+    local dir="/etc/apt/sec_toolbox_sources_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$dir"
+    [ -f /etc/apt/sources.list ] && cp -a /etc/apt/sources.list "$dir/sources.list"
+    echo "$dir"
+}
+
+restore_apt_sources() { local dir="$1"; [ -f "$dir/sources.list" ] && cp -a "$dir/sources.list" /etc/apt/sources.list; }
+
+write_debian_sources() {
+    local codename="$1" mirror="$2" comps="main contrib non-free"
+    case "$codename" in bookworm|trixie) comps="main contrib non-free non-free-firmware" ;; esac
+    cat > /etc/apt/sources.list <<EOF
+# Generated by Linux Security Toolbox. Backup is stored under /etc/apt/sec_toolbox_sources_backup_*
+deb ${mirror} ${codename} ${comps}
+deb ${mirror} ${codename}-updates ${comps}
+deb https://deb.debian.org/debian ${codename} ${comps}
+deb https://security.debian.org/debian-security ${codename}-security ${comps}
+EOF
+}
+
+write_ubuntu_sources() {
+    local codename="$1" mirror="$2" comps="main restricted universe multiverse"
+    cat > /etc/apt/sources.list <<EOF
+# Generated by Linux Security Toolbox. Backup is stored under /etc/apt/sec_toolbox_sources_backup_*
+deb ${mirror} ${codename} ${comps}
+deb ${mirror} ${codename}-updates ${comps}
+deb ${mirror} ${codename}-backports ${comps}
+deb https://archive.ubuntu.com/ubuntu ${codename} ${comps}
+deb https://security.ubuntu.com/ubuntu ${codename}-security ${comps}
+EOF
+}
+
+apply_apt_mirror_auto() {
+    command -v apt-get >/dev/null 2>&1 || { ui_warn "非 APT 系统，跳过软件源优化。"; return 0; }
+    load_os_release
+    is_debian_like || { ui_warn "当前发行版不是 Debian/Ubuntu 系，跳过软件源优化。"; return 0; }
+    local codename backup mirror
+    codename=$(detect_apt_codename) || { ui_warn "无法识别发行版代号，跳过换源。"; return 1; }
+    backup=$(backup_apt_sources)
+    if [ "$OS_ID" = "ubuntu" ]; then
+        if is_china_network; then mirror=$(pick_fastest_mirror "$codename" "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/" "https://mirrors.ustc.edu.cn/ubuntu/" "https://mirrors.aliyun.com/ubuntu/"); else mirror="https://archive.ubuntu.com/ubuntu/"; fi
+        [ -z "$mirror" ] && mirror="https://archive.ubuntu.com/ubuntu/"
+        write_ubuntu_sources "$codename" "$mirror"
+    else
+        if is_china_network; then mirror=$(pick_fastest_mirror "$codename" "https://mirrors.tuna.tsinghua.edu.cn/debian/" "https://mirrors.ustc.edu.cn/debian/" "https://mirrors.aliyun.com/debian/"); else mirror="https://deb.debian.org/debian/"; fi
+        [ -z "$mirror" ] && mirror="https://deb.debian.org/debian/"
+        write_debian_sources "$codename" "$mirror"
+    fi
+    ui_info "已选择软件源: $mirror，并保留官方源兜底。备份: $backup"
+    if apt-get -o Acquire::Retries=2 update >/tmp/sec_toolbox_apt_update.log 2>&1; then ui_ok "APT 软件源优化完成。"; APT_UPDATED=1; return 0; fi
+    ui_fail "新软件源验证失败，正在恢复备份..."
+    restore_apt_sources "$backup"
+    apt-get -o Acquire::Retries=2 update >/dev/null 2>&1 || true
+    return 1
+}
+
+apt_update_once() {
+    [ "$APT_UPDATED" -eq 1 ] && return 0
+    handle_lock || return 1
+    ui_info "正在刷新 APT 索引..."
+    if apt-get -o Acquire::Retries=2 update >/tmp/sec_toolbox_apt_update.log 2>&1; then APT_UPDATED=1; return 0; fi
+    ui_warn "APT 索引刷新失败，尝试自动优化软件源..."
+    apply_apt_mirror_auto || { ui_fail "APT 源优化失败。日志:"; tail -n 8 /tmp/sec_toolbox_apt_update.log 2>/dev/null; return 1; }
     return 0
 }
 
 # --- 安全环境预检 ---
 heal_environment() {
     ui_info "正在执行环境预检..."
+    load_os_release
     handle_lock || return 1
-    if command -v dpkg >/dev/null 2>&1; then
-        UCF_FORCE_CONFFOLD=1 dpkg --configure -a >/dev/null 2>&1 || return 1
-    fi
+    if command -v dpkg >/dev/null 2>&1; then UCF_FORCE_CONFFOLD=1 dpkg --configure -a >/dev/null 2>&1 || return 1; fi
     ui_ok "环境准备就绪。"
+}
+
+map_package() {
+    local pkg="$1"
+    if command -v apt-get >/dev/null 2>&1; then
+        case "$pkg" in fuser) echo psmisc;; ping) echo iputils-ping;; nslookup) echo dnsutils;; ss) echo iproute2;; netstat) echo net-tools;; *) echo "$pkg";; esac
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        case "$pkg" in fuser) echo psmisc;; ping) echo iputils;; nslookup) echo bind-utils;; ss) echo iproute;; netstat) echo net-tools;; *) echo "$pkg";; esac
+    else echo "$pkg"; fi
+}
+
+map_packages() {
+    local out="" p mapped
+    for p in "$@"; do mapped=$(map_package "$p"); case " $out " in *" $mapped "*) ;; *) out="$out $mapped";; esac; done
+    echo "$out"
+}
+
+make_cache_once() {
+    [ "$YUM_CACHED" -eq 1 ] && return 0
+    command -v dnf >/dev/null 2>&1 && dnf makecache -y >/dev/null 2>&1 || true
+    command -v yum >/dev/null 2>&1 && yum makecache -y >/dev/null 2>&1 || true
+    YUM_CACHED=1
 }
 
 # --- 批量安装 ---
 smart_install() {
-    local pkgs="$*"
+    load_os_release
     handle_lock || return 1
-    ui_info "批量安装组件: $pkgs ..."
-    local log="/tmp/install_err.log"
-    if command -v apt-get >/dev/null; then
-        ( UCF_FORCE_CONFFOLD=1 apt-get install -y $pkgs ) >/dev/null 2>"$log" &
-    elif command -v dnf >/dev/null; then
-        dnf install -y $pkgs >/dev/null 2>"$log" &
-    elif command -v yum >/dev/null; then
-        yum install -y $pkgs >/dev/null 2>"$log" &
-    else return 1; fi
-    local pid=$!; show_spinner "$pid"; wait "$pid"
-    [ $? -ne 0 ] && { ui_fail "安装失败，日志:"; tail -n 5 "$log" 2>/dev/null; return 1; }
-    rm -f "$log"; return 0
+    local mapped log pid
+    mapped=$(map_packages "$@")
+    ui_info "批量安装组件:$mapped ..."
+    log=$(mktemp /tmp/sec_toolbox_install.XXXXXX)
+    if command -v apt-get >/dev/null 2>&1; then
+        apt_update_once || { rm -f "$log"; return 1; }
+        ( UCF_FORCE_CONFFOLD=1 apt-get install -y $mapped ) >/dev/null 2>"$log" &
+    elif command -v dnf >/dev/null 2>&1; then
+        make_cache_once; dnf install -y $mapped >/dev/null 2>"$log" &
+    elif command -v yum >/dev/null 2>&1; then
+        make_cache_once; yum install -y $mapped >/dev/null 2>"$log" &
+    else ui_fail "未找到支持的包管理器。"; rm -f "$log"; return 1; fi
+    pid=$!; show_spinner "$pid"; wait "$pid"
+    if [ $? -ne 0 ]; then
+        if command -v apt-get >/dev/null 2>&1 && echo "$mapped" | grep -qw dnsutils; then
+            ui_warn "dnsutils 安装失败，尝试 bind9-dnsutils 兼容包..."
+            mapped=$(echo "$mapped" | sed 's/\bdnsutils\b/bind9-dnsutils/g')
+            ( UCF_FORCE_CONFFOLD=1 apt-get install -y $mapped ) >/dev/null 2>"$log" &
+            pid=$!; show_spinner "$pid"; wait "$pid" && { rm -f "$log"; return 0; }
+        fi
+        ui_fail "安装失败，日志:"
+        tail -n 8 "$log" 2>/dev/null
+        rm -f "$log"
+        return 1
+    fi
+    rm -f "$log"
+    return 0
 }
 
 # --- 数据定义 (安全精简版) ---
@@ -174,9 +308,10 @@ is_eol() { if [ -f /etc/os-release ]; then . /etc/os-release; [[ "$ID" == "debia
 # === [关键补全] 所有项目的优点和风险描述全部填满，无省略 ===
 init_audit() {
     # 1. 基础优化
+    add_item "自动优化 APT 软件源" "根据网络自动选择镜像并保留官方源" "会备份并改写 /etc/apt/sources.list" "[ ! -f /etc/apt/sources.list ] || grep -q 'sec_toolbox_sources_backup' /etc/apt/sources.list" "FALSE"
     add_item "开启 TCP BBR 加速" "提升部分网络场景吞吐" "需内核支持 tcp_bbr" "sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -qw bbr" "FALSE"
     add_item "系统资源限制优化" "提升系统高并发处理能力" "无" "grep -q 'soft nofile 65535' /etc/security/limits.conf" "FALSE"
-    add_item "安装装机必备软件" "预装 curl/vim/htop/git" "占用少量磁盘空间" "command -v vim >/dev/null && command -v htop >/dev/null && command -v unzip >/dev/null" "FALSE"
+    add_item "安装装机必备软件" "预装 curl/wget/vim/git/网络诊断工具" "占用少量磁盘空间" "command -v curl >/dev/null && command -v wget >/dev/null && command -v vim >/dev/null && command -v git >/dev/null && command -v ping >/dev/null && command -v nslookup >/dev/null" "FALSE"
 
     # 2. SSH 安全（仅保留低锁死风险项；关闭密码/Root 登录请使用 v2.sh 手动确认流程）
     add_item "开启公钥认证支持" "允许使用密钥登录系统" "无" "has_sshd_config && grep -q '^PubkeyAuthentication yes' \"$SSHD_CONFIG\"" "FALSE"
@@ -220,6 +355,7 @@ apply_fix() {
     esac
 
     case "$title" in
+        "自动优化 APT 软件源") apply_apt_mirror_auto ;;
         "开启 TCP BBR 加速")
             if bbr_available; then
                 sed -i '/^net.core.default_qdisc=/d;/^net.ipv4.tcp_congestion_control=/d' /etc/sysctl.conf
@@ -232,7 +368,7 @@ apply_fix() {
             fi ;;
         "系统资源限制优化")
             echo "* soft nofile 65535" >> /etc/security/limits.conf; echo "* hard nofile 65535" >> /etc/security/limits.conf; ui_ok "资源限制已优化。" ;;
-        "安装装机必备软件") smart_install "curl wget vim unzip htop git net-tools" ;;
+        "安装装机必备软件") smart_install curl wget vim unzip htop git netstat fuser ping nslookup ss ca-certificates gnupg ;;
         "强制 SSH 协议 V2") sed -i '/^Protocol/d' "$SSHD_CONFIG"; echo "Protocol 2" >> "$SSHD_CONFIG" ;;
         "开启公钥认证支持") sed -i '/^PubkeyAuthentication/d' "$SSHD_CONFIG"; echo "PubkeyAuthentication yes" >> "$SSHD_CONFIG" ;;
         "禁止 SSH 空密码") sed -i '/^PermitEmptyPasswords/d' "$SSHD_CONFIG"; echo "PermitEmptyPasswords no" >> "$SSHD_CONFIG" ;;
@@ -248,7 +384,7 @@ apply_fix() {
         "网络内核防欺骗") echo "net.ipv4.conf.all.accept_redirects = 0" > /etc/sysctl.d/99-sec.conf; sysctl --system >/dev/null 2>&1 ;;
         "开启 SYN Cookie") sysctl -w net.ipv4.tcp_syncookies=1 >/dev/null 2>&1 ;;
         "记录恶意数据包") sysctl -w net.ipv4.conf.all.log_martians=1 >/dev/null 2>&1 ;;
-        "时间同步(Chrony)") smart_install "chrony" && systemctl enable --now chronyd >/dev/null 2>&1 ;;
+        "时间同步(Chrony)") smart_install chrony && { systemctl enable --now chronyd >/dev/null 2>&1 || systemctl enable --now chrony >/dev/null 2>&1; } ;;
         "日志自动轮转(500M)") sed -i '/^SystemMaxUse/d' /etc/systemd/journald.conf; echo "SystemMaxUse=500M" >> /etc/systemd/journald.conf; systemctl restart systemd-journald ;;
         "Fail2ban 最佳防护") smart_install "fail2ban" && { cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]

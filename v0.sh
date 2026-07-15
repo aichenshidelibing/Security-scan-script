@@ -175,7 +175,7 @@ print_report() {
     echo -e "安全评分: [${S_COLOR}${bar_str}${RESET}] ${S_COLOR}${BOLD}$SCORE 分${RESET}"
     echo -e "评估结论: $MSG"
     
-    [ $SCORE -lt 100 ] && echo -e "\n${YELLOW}${I_WARN} 发现风险项！请运行 ${CYAN}v1.sh${YELLOW} 进行一键修复。${RESET}"
+    [ $SCORE -lt 100 ] && echo -e "\n${YELLOW}${I_WARN} 发现风险项！基础项可运行 ${CYAN}v1.sh${YELLOW} 修复；SSH 端口/密码/Root 登录策略请运行 ${CYAN}v2.sh${YELLOW} 手动确认配置。${RESET}"
     
     # 正常结束时不触发 trap，而是手动暂停
     trap - EXIT

@@ -188,9 +188,9 @@ main_menu() {
         printf " [0] %-30s [状态: %s]\n" "全维审计 (v0.sh)" "$(st v0.sh)"
         echo -e "     ${GREY}└─ 只查不改 / 硬件仪表盘 / 安全精简审计 / 评分报告${RESET}"
         printf " [1] %-30s [状态: %s]\n" "基础管家 (v1.sh)" "$(st v1.sh)"
-        echo -e "     ${GREY}└─ BBR加速 / 基础工具 / SSH低风险项 / 权限与日志修复${RESET}"
-        printf " [2] %-30s [状态: %s]\n" "密钥配置 (v2.sh)" "$(st v2.sh)"
-        echo -e "     ${GREY}└─ 禁用密码登录 / 自动生成密钥对 / 权限自动修正${RESET}"
+        echo -e "     ${GREY}└─ APT源优化 / 基础工具 / SSH低风险项 / 权限与日志修复${RESET}"
+        printf " [2] %-30s [状态: %s]\n" "SSH策略中心 (v2.sh)" "$(st v2.sh)"
+        echo -e "     ${GREY}└─ 密钥部署 / 改端口 / 密码登录 / Root登录策略 / 回滚${RESET}"
         printf " [3] %-30s [状态: %s]\n" "网络隐身 (v3.sh)" "$(st v3.sh)"
         echo -e "     ${GREY}└─ 开启或关闭禁 Ping / 隐藏服务器存活状态${RESET}"
         ui_line
