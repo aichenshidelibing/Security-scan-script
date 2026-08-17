@@ -6,6 +6,17 @@
 set -u
 export LC_ALL=C
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SCRIPT_DIR/lib/runtime.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/lib/runtime.sh"
+    sec_toolbox_acquire_lock "v2.sh" || exit 75
+    trap 'sec_toolbox_release_lock' EXIT
+else
+    echo "[error] lib/runtime.sh is required; run install.sh to refresh the toolbox." >&2
+    exit 1
+fi
+
 trap 'exit 0' INT
 
 # ---------- 统一自适应 UI 区 ----------

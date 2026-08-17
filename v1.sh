@@ -6,13 +6,26 @@ export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
 export UCF_FORCE_CONFFOLD=1
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SCRIPT_DIR/lib/runtime.sh" ] && [ -f "$SCRIPT_DIR/lib/network_checks.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/lib/runtime.sh"
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/lib/network_checks.sh"
+else
+    echo "[error] lib/runtime.sh and lib/network_checks.sh are required; run install.sh to refresh the toolbox." >&2
+    exit 1
+fi
+sec_toolbox_acquire_lock "v1.sh" || exit 75
+
 # =======================================================================
 # [核心交互修复] 信号管理
 # =======================================================================
 # 1. 正常退出时的逻辑 (当脚本自然结束时)
 finish_trap() {
-    echo -e "\n\033[33m[系统提示] 脚本执行结束。按回车键继续...\033[0m"
-    read -r
+    sec_toolbox_release_lock
+    echo -e "\n\033[33m[system] script finished. press Enter to continue...\033[0m"
+    [ -t 0 ] && read -r || true
 }
 # 默认开启 EXIT 陷阱
 trap finish_trap EXIT
@@ -69,54 +82,39 @@ load_os_release() {
 
 is_debian_like() { [[ "$OS_ID $OS_ID_LIKE" =~ debian|ubuntu ]]; }
 
-# --- [鹰眼] 网络侦测 (缺工具时降级为未检测) ---
+# --- [network insight] IPv4/IPv6 aware diagnostics ---
 NET_BANNER=""
 init_network_insight() {
-    echo -ne "${CYAN}${I_WAIT} 正在进行网络与防火墙态势感知 (约需 3 秒)...${RESET}"
-    local fw_status="${GREEN}未检测到活动防火墙${RESET}"
-    if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "active"; then fw_status="${YELLOW}UFW 运行中${RESET}"; fi
-    if command -v firewall-cmd >/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then fw_status="${YELLOW}Firewalld 运行中${RESET}"; fi
-    if command -v iptables >/dev/null && [ "$(iptables -L INPUT 2>/dev/null | wc -l)" -gt 10 ]; then fw_status="${YELLOW}Iptables 活跃${RESET}"; fi
+    echo -ne "${CYAN}${I_WAIT} network and firewall insight (about 3 seconds)...${RESET}"
+    local fw_status="${GREEN}no active firewall detected${RESET}"
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then fw_status="${YELLOW}UFW active${RESET}"; fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then fw_status="${YELLOW}Firewalld active${RESET}"; fi
+    if command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1; then fw_status="${YELLOW}nftables active${RESET}"; fi
+    if command -v iptables >/dev/null 2>&1 && iptables -S >/dev/null 2>&1; then fw_status="${YELLOW}iptables active${RESET}"; fi
 
-    local icmp_status tcp_status dns_status
-    if command -v ping >/dev/null 2>&1; then
-        if ping -c 1 -W 1 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then icmp_status="${GREEN}ICMP${RESET}"; else icmp_status="${RED}ICMP(阻断)${RESET}"; fi
-    else icmp_status="${GREY}ICMP(未检测: 缺少 ping)${RESET}"; fi
-
-    if command -v curl >/dev/null 2>&1; then
-        if curl -s --connect-timeout 2 https://www.baidu.com >/dev/null 2>&1 || curl -s --connect-timeout 2 https://www.google.com >/dev/null 2>&1; then tcp_status="${GREEN}TCP${RESET}"; else tcp_status="${RED}TCP(阻断)${RESET}"; fi
-    elif command -v wget >/dev/null 2>&1; then
-        if wget -q --spider --timeout=2 https://www.baidu.com >/dev/null 2>&1 || wget -q --spider --timeout=2 https://www.google.com >/dev/null 2>&1; then tcp_status="${GREEN}TCP${RESET}"; else tcp_status="${RED}TCP(阻断)${RESET}"; fi
-    else tcp_status="${GREY}TCP(未检测: 缺少 curl/wget)${RESET}"; fi
-
-    if command -v nslookup >/dev/null 2>&1; then
-        if timeout 2 nslookup google.com 8.8.8.8 >/dev/null 2>&1 || timeout 2 nslookup baidu.com 223.5.5.5 >/dev/null 2>&1; then dns_status="${GREEN}DNS${RESET}"; else dns_status="${RED}DNS(阻断)${RESET}"; fi
-    else dns_status="${GREY}DNS(未检测: 缺少 nslookup)${RESET}"; fi
+    local ip_mode icmp_raw dns_raw tcp_raw
+    ip_mode=$(sec_detect_ip_mode)
+    icmp_raw=$(sec_probe_icmp "$ip_mode")
+    dns_raw=$(sec_probe_dns)
+    tcp_raw=$(sec_probe_tcp "$ip_mode")
+    local icmp_status="$(sec_network_label "$icmp_raw")"
+    local dns_status="$(sec_network_label "$dns_raw")"
+    local tcp_status="$(sec_network_label "$tcp_raw")"
 
     NET_BANNER="${BLUE}================================================================================${RESET}\n"
-    NET_BANNER+="${I_WALL} 内部防火墙: [ $fw_status ]   ${I_NET} 出站: [ $icmp_status | $tcp_status | $dns_status ]\n"
-    NET_BANNER+="${GREY}   (提示: 未检测不等于失败，可先安装基础工具后重新运行)${RESET}"
+    NET_BANNER+="${I_WALL} firewall: [ $fw_status ]   ${I_NET} network stack: [ ${ip_mode} ]\n"
+    NET_BANNER+="${GREY}   outbound probes: ICMP=[ $icmp_status ] | TCP=[ $tcp_status ] | DNS=[ $dns_status ]${RESET}\n"
+    NET_BANNER+="${GREY}   probe failures may mean upstream policy, no route, an unresponsive target, or missing tools; they are not automatically local blocks.${RESET}"
     echo -e "\r                                                               \r"
 }
 
-# --- 智能锁管理 ---
-lock_busy() {
-    local lock="$1"
-    [ -f "$lock" ] || return 1
-    if command -v fuser >/dev/null 2>&1; then fuser "$lock" >/dev/null 2>&1; else return 0; fi
-}
-
+# --- package-manager lock management ---
+lock_busy() { sec_package_manager_busy; }
 handle_lock() {
-    local locks=("/var/lib/dpkg/lock-frontend" "/var/lib/dpkg/lock" "/var/lib/apt/lists/lock")
-    local locked="" lock
-    for lock in "${locks[@]}"; do if lock_busy "$lock"; then locked="$lock"; break; fi; done
-    [ -z "$locked" ] && return 0
-    ui_warn "检测到包管理器锁: $locked"
-    command -v fuser >/dev/null 2>&1 || ui_warn "缺少 fuser(psmisc)，无法识别锁持有进程，将仅等待锁文件状态。"
-    local count=0
-    while lock_busy "$locked" && [ "$count" -lt 30 ]; do sleep 1; count=$((count+1)); done
-    if lock_busy "$locked"; then ui_fail "包管理器仍被占用，请稍后重试或手动检查 apt/dpkg 进程。"; return 1; fi
-    command -v dpkg >/dev/null 2>&1 && dpkg --configure -a >/dev/null 2>&1
+    sec_wait_for_package_manager "${SEC_TOOLBOX_PACKAGE_WAIT:-90}" || {
+        ui_fail "apt/dpkg/dnf/yum is still running; retry later and do not delete lock files."
+        return 1
+    }
     return 0
 }
 
@@ -201,10 +199,10 @@ apply_apt_mirror_auto() {
         write_debian_sources "$codename" "$mirror"
     fi
     ui_info "已选择软件源: $mirror，并保留官方源兜底。备份: $backup"
-    if apt-get -o Acquire::Retries=2 update >/tmp/sec_toolbox_apt_update.log 2>&1; then ui_ok "APT 软件源优化完成。"; APT_UPDATED=1; return 0; fi
+    if sec_with_package_manager_lock apt-get -o Acquire::Retries=2 update >/tmp/sec_toolbox_apt_update.log 2>&1; then ui_ok "APT 软件源优化完成。"; APT_UPDATED=1; return 0; fi
     ui_fail "新软件源验证失败，正在恢复备份..."
     restore_apt_sources "$backup"
-    apt-get -o Acquire::Retries=2 update >/dev/null 2>&1 || true
+    sec_with_package_manager_lock apt-get -o Acquire::Retries=2 update >/dev/null 2>&1 || true
     return 1
 }
 
@@ -212,7 +210,7 @@ apt_update_once() {
     [ "$APT_UPDATED" -eq 1 ] && return 0
     handle_lock || return 1
     ui_info "正在刷新 APT 索引..."
-    if apt-get -o Acquire::Retries=2 update >/tmp/sec_toolbox_apt_update.log 2>&1; then APT_UPDATED=1; return 0; fi
+    if sec_with_package_manager_lock apt-get -o Acquire::Retries=2 update >/tmp/sec_toolbox_apt_update.log 2>&1; then APT_UPDATED=1; return 0; fi
     ui_warn "APT 索引刷新失败，尝试自动优化软件源..."
     apply_apt_mirror_auto || { ui_fail "APT 源优化失败。日志:"; tail -n 8 /tmp/sec_toolbox_apt_update.log 2>/dev/null; return 1; }
     return 0
@@ -223,7 +221,7 @@ heal_environment() {
     ui_info "正在执行环境预检..."
     load_os_release
     handle_lock || return 1
-    if command -v dpkg >/dev/null 2>&1; then UCF_FORCE_CONFFOLD=1 dpkg --configure -a >/dev/null 2>&1 || return 1; fi
+    if command -v dpkg >/dev/null 2>&1; then sec_with_package_manager_lock env UCF_FORCE_CONFFOLD=1 dpkg --configure -a >/dev/null 2>&1 || return 1; fi
     ui_ok "环境准备就绪。"
 }
 
@@ -253,27 +251,35 @@ make_cache_once() {
 smart_install() {
     load_os_release
     handle_lock || return 1
-    local mapped log pid
+    local mapped log status
     mapped=$(map_packages "$@")
-    ui_info "批量安装组件:$mapped ..."
+    ui_info "installing packages:$mapped ..."
     log=$(mktemp /tmp/sec_toolbox_install.XXXXXX)
     if command -v apt-get >/dev/null 2>&1; then
         apt_update_once || { rm -f "$log"; return 1; }
-        ( UCF_FORCE_CONFFOLD=1 apt-get install -y $mapped ) >/dev/null 2>"$log" &
+        sec_with_package_manager_lock env UCF_FORCE_CONFFOLD=1 apt-get install -y $mapped >/dev/null 2>"$log"
+        status=$?
     elif command -v dnf >/dev/null 2>&1; then
-        make_cache_once; dnf install -y $mapped >/dev/null 2>"$log" &
+        make_cache_once
+        sec_with_package_manager_lock dnf install -y $mapped >/dev/null 2>"$log"
+        status=$?
     elif command -v yum >/dev/null 2>&1; then
-        make_cache_once; yum install -y $mapped >/dev/null 2>"$log" &
-    else ui_fail "未找到支持的包管理器。"; rm -f "$log"; return 1; fi
-    pid=$!; show_spinner "$pid"; wait "$pid"
-    if [ $? -ne 0 ]; then
-        if command -v apt-get >/dev/null 2>&1 && echo "$mapped" | grep -qw dnsutils; then
-            ui_warn "dnsutils 安装失败，尝试 bind9-dnsutils 兼容包..."
-            mapped=$(echo "$mapped" | sed 's/\bdnsutils\b/bind9-dnsutils/g')
-            ( UCF_FORCE_CONFFOLD=1 apt-get install -y $mapped ) >/dev/null 2>"$log" &
-            pid=$!; show_spinner "$pid"; wait "$pid" && { rm -f "$log"; return 0; }
-        fi
-        ui_fail "安装失败，日志:"
+        make_cache_once
+        sec_with_package_manager_lock yum install -y $mapped >/dev/null 2>"$log"
+        status=$?
+    else
+        ui_fail "no supported package manager found."
+        rm -f "$log"
+        return 1
+    fi
+    if [ "$status" -ne 0 ] && command -v apt-get >/dev/null 2>&1 && printf '%s\n' "$mapped" | grep -qw dnsutils; then
+        ui_warn "dnsutils install failed; trying bind9-dnsutils compatibility package..."
+        mapped=$(printf '%s\n' "$mapped" | sed 's/\<dnsutils\>/bind9-dnsutils/g')
+        sec_with_package_manager_lock env UCF_FORCE_CONFFOLD=1 apt-get install -y $mapped >/dev/null 2>"$log"
+        status=$?
+    fi
+    if [ "$status" -ne 0 ]; then
+        ui_fail "package install failed; last log lines:"
         tail -n 8 "$log" 2>/dev/null
         rm -f "$log"
         return 1

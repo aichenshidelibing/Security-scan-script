@@ -9,7 +9,15 @@ export LC_ALL=C
 FORCE_TEXT_MODE=0
 
 # --- 配置 ---
-GITHUB_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+GITHUB_BASE="https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+GITHUB_FALLBACK_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+GITHUB_ACCELERATOR_BASES=(
+    "$GITHUB_FALLBACK_BASE"
+    "https://ghproxy.net/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+    "https://ghfast.top/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+    "https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+)
+GITHUB_RAW_BASE="https://github.com/aichenshidelibing/Security-scan-script/raw/refs/heads/main"
 TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>" # 唯一特征识别码
 
 # --- [核心] 智能环境检测与配色 ---
@@ -60,34 +68,70 @@ show_dashboard() {
 }
 
 # --- 核心函数：下载 ---
-download_script() {
-    local name="$1"
-    local url="${GITHUB_BASE}/${name}"
-    
-    echo -ne "${CYAN}${I_DL} 正在获取 ${name}... ${RESET}"
-    if cmd_exists wget; then
-        wget -q -O "$name" "$url"
-    elif cmd_exists curl; then
-        curl -s -o "$name" "$url"
-    else
-        echo -e "${RED}失败 (缺少工具)${RESET}"
-        return 1
+download_family_args() {
+    local mode=""
+    if command -v ip >/dev/null 2>&1; then
+        if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 ' &&
+           ! ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
+            mode=ipv6
+        fi
     fi
+    [ "$mode" = ipv6 ] && printf '%s\n' '-6'
+}
 
-    if [ -s "$name" ]; then
+download_script() {
+    local name="$1" target_family url downloaded=1
+    target_family=$(download_family_args)
+    mkdir -p "$(dirname -- "$name")" 2>/dev/null || return 1
+    echo -ne "${CYAN}${I_DL} fetching ${name}... ${RESET}"
+
+    # Official raw is always first. Accelerators are best-effort fallbacks:
+    # their IPv6 availability and URL behavior can change, so every request
+    # is bounded and the next endpoint is tried automatically.
+    local bases=("$GITHUB_BASE" "$GITHUB_RAW_BASE" "${GITHUB_ACCELERATOR_BASES[@]}")
+    for base in "${bases[@]}"; do
+        url="${base}/${name}"
+        rm -f -- "$name"
+        if cmd_exists curl; then
+            if [ -n "$target_family" ]; then
+                curl "$target_family" -fsSL --connect-timeout 5 --max-time 30 --retry 2 -o "$name" "$url" >/dev/null 2>&1
+            else
+                curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 -o "$name" "$url" >/dev/null 2>&1
+            fi
+        elif cmd_exists wget; then
+            if [ -n "$target_family" ]; then
+                wget "$target_family" -q -O "$name" --timeout=10 --tries=2 "$url" >/dev/null 2>&1
+            else
+                wget -q -O "$name" --timeout=8 --tries=2 "$url" >/dev/null 2>&1
+            fi
+        else
+            downloaded=0
+            break
+        fi
+        if [ -s "$name" ]; then downloaded=1; break; fi
+        downloaded=0
+    done
+
+    if [ "$downloaded" -eq 1 ] && [ -s "$name" ]; then
         sed -i 's/\r$//' "$name" 2>/dev/null
         chmod +x "$name"
-        echo -e "${GREEN}成功${RESET}"
+        echo -e "${GREEN}success${RESET}"
         return 0
-    else
-        echo -e "${RED}失败 (文件无效)${RESET}"
-        return 1
     fi
+    rm -f -- "$name"
+    echo -e "${RED}failed (no IPv4/IPv6-compatible endpoint succeeded)${RESET}"
+    return 1
+}
+
+download_runtime_libs() {
+    download_script "lib/runtime.sh" || return 1
+    download_script "lib/network_checks.sh" || return 1
+    download_script "lib/github.sh" || return 1
 }
 
 # --- 本地自检：语法与基础完整性 ---
 self_check() {
-    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh"
+    local scripts="install.sh lib/runtime.sh lib/network_checks.sh lib/github.sh v0.sh v1.sh v2.sh v3.sh v4.sh"
     local failed=0
 
     echo ""
@@ -130,6 +174,7 @@ menu_download() {
         echo " [1] 下载 v1.sh (全能管家/修复)"
         echo " [2] 下载 v2.sh (SSH密钥配置)"
         echo " [3] 下载 v3.sh (网络隐身/禁Ping)"
+        echo " [4] 下载 v4.sh (IPv6出口/WARP/GitHub加速)"
         ui_line
         echo " [a] 一键更新所有脚本 (All)"
         echo " [q] 返回主菜单"
@@ -138,8 +183,8 @@ menu_download() {
         read -r dl_choice
         
         case "$dl_choice" in
-            [0-3]) download_script "v${dl_choice}.sh"; sleep 1 ;;
-            a|A) for s in v0.sh v1.sh v2.sh v3.sh; do download_script "$s"; done
+            [0-4]) download_runtime_libs && download_script "v${dl_choice}.sh"; sleep 1 ;;
+            a|A) download_runtime_libs; for s in v0.sh v1.sh v2.sh v3.sh v4.sh; do download_script "$s"; done
                 ui_ok "同步完成。"; sleep 1; return ;;
             q|Q) return ;;
         esac
@@ -193,6 +238,8 @@ main_menu() {
         echo -e "     ${GREY}└─ 密钥部署 / 改端口 / 密码登录 / Root登录策略 / 回滚${RESET}"
         printf " [3] %-30s [状态: %s]\n" "网络隐身 (v3.sh)" "$(st v3.sh)"
         echo -e "     ${GREY}└─ 开启或关闭禁 Ping / 隐藏服务器存活状态${RESET}"
+        printf " [4] %-30s [状态: %s]\n" "IPv6出口中心 (v4.sh)" "$(st v4.sh)"
+        echo -e "     ${GREY}└─ WARP IPv4 出口 / GitHub IPv6 加速 fallback${RESET}"
         ui_line
         echo " [7] 本地自检 (检查脚本语法)"
         echo " [8] 智能清理 (清理所有工具脚本)"
@@ -203,7 +250,7 @@ main_menu() {
         read -r CHOICE
 
         case "$CHOICE" in
-            [0-3])
+            [0-4])
                 local S="v${CHOICE}.sh"
                 if [ -f "$S" ]; then bash ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;
@@ -217,11 +264,17 @@ main_menu() {
 
 # --- 前置检查 ---
 [ "$(id -u)" -eq 0 ] || { echo -e "${RED}${I_FAIL} 错误: 请使用 root 权限运行。${RESET}"; exit 1; }
-if [ ! -x "v0.sh" ] && [ ! -x "v1.sh" ]; then
+core_missing=0
+for core in v0.sh v1.sh v2.sh v3.sh v4.sh lib/runtime.sh lib/network_checks.sh lib/github.sh; do
+    [ -f "$core" ] || core_missing=1
+done
+if [ "$core_missing" -eq 1 ]; then
     show_dashboard
     echo -e "${YELLOW}${I_WARN} 检测到核心组件缺失，正在进行初始化下载...${RESET}"
-    download_script "v0.sh"
-    download_script "v1.sh"
+    download_runtime_libs || exit 1
+    for script in v0.sh v1.sh v2.sh v3.sh v4.sh; do
+        download_script "$script" || exit 1
+    done
     sleep 1
 fi
 

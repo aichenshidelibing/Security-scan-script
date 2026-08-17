@@ -5,12 +5,23 @@
 
 export LC_ALL=C
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SCRIPT_DIR/lib/runtime.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/lib/runtime.sh"
+    sec_toolbox_acquire_lock "v0.sh" || exit 75
+else
+    echo "[error] lib/runtime.sh is required; run install.sh to refresh the toolbox." >&2
+    exit 1
+fi
+
 # =======================================================================
 # [核心防闪退] 退出前强制暂停
 # =======================================================================
 finish_trap() {
+    sec_toolbox_release_lock
     echo -e "\n\033[33m[系统提示] 审计结束。请按回车键关闭窗口...\033[0m"
-    read -r
+    [ -t 0 ] && read -r || true
 }
 trap finish_trap EXIT
 # =======================================================================
