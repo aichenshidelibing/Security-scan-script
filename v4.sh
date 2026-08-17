@@ -43,6 +43,46 @@ warp_installed() { command -v warp-cli >/dev/null 2>&1; }
 warp_status_text() { warp-cli status 2>/dev/null || true; }
 warp_connected() { warp_status_text | grep -Eiq '(^|[[:space:]:])connected([[:space:]]|$)|已连接'; }
 
+warp_registration_text() { run_warp_cli registration show 2>&1; }
+
+warp_is_registered() {
+    local text
+    warp_installed || return 1
+    text=$(warp_registration_text) || return 1
+    [ -n "$text" ] || return 1
+    printf '%s\n' "$text" | grep -Eiq 'not[[:space:]-]*registered|未注册|no[[:space:]]+registration' && return 1
+    # Different warp-cli versions use different labels, so accept several
+    # explicit positive registration fields while rejecting absent states.
+    printf '%s\n' "$text" | grep -Eiq 'registered|registration[[:space:]]*:[[:space:]]*[[:alnum:]]|account[[:space:]]+type|device[[:space:]]+id|organization|license|profile|public[[:space:]]+key|id[[:space:]:=]' \
+        || return 1
+}
+
+warp_settings_text() {
+    warp_installed || return 0
+    run_warp_cli settings 2>&1
+}
+
+warp_current_mode() {
+    local text
+    text="$(warp_settings_text)"
+    if printf '%s\n' "$text" | grep -Eiq 'mode[[:space:]]*:[[:space:]]*warp[+]?doh|warp[+]?doh'; then
+        printf 'warp+doh\n'
+    elif printf '%s\n' "$text" | grep -Eiq 'mode[[:space:]]*:[[:space:]]*warp([[:space:]]|$)|(^|[[:space:]])warp([[:space:]]|$)'; then
+        printf 'warp\n'
+    elif printf '%s\n' "$text" | grep -Eiq 'mode[[:space:]]*:[[:space:]]*(proxy|proxy\+doh)|proxy'; then
+        printf 'proxy\n'
+    else
+        printf 'unknown\n'
+    fi
+}
+
+warp_is_full_tunnel() {
+    case "$(warp_current_mode)" in
+        warp|warp+doh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 network_family_args() {
     local mode=""
     command -v sec_detect_ip_mode >/dev/null 2>&1 && mode=$(sec_detect_ip_mode 2>/dev/null || true)
@@ -57,6 +97,10 @@ curl_family() {
 
 run_warp_cli() { sec_v4_timeout 25 warp-cli "$@"; }
 run_systemctl() { sec_v4_timeout 25 systemctl "$@"; }
+warp_service_active() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl is-active --quiet warp-svc >/dev/null 2>&1
+}
 
 warp_install_apt() {
     [ "$(id -u)" -eq 0 ] || { fail '安装 WARP 需要 root 权限。'; return 1; }
@@ -105,28 +149,75 @@ warp_install() {
     warp_install_apt
 }
 
+probe_exit_ok() {
+    local family="$1" url='https://cloudflare.com/cdn-cgi/trace' label="$2" out
+    command -v curl >/dev/null 2>&1 || return 1
+    out="${TMPDIR:-/tmp}/sec-exit-check.$$.$RANDOM"
+    curl "$family" -fsSL --connect-timeout 3 --max-time 8 -o "$out" "$url" >/dev/null 2>&1 || {
+        rm -f -- "$out"
+        return 1
+    }
+    grep -Eq '(^|\n)(ip=|warp=)' "$out" 2>/dev/null
+    local result=$?
+    rm -f -- "$out"
+    return "$result"
+}
+
+warp_ipv4_exit_ok() { probe_exit_ok -4 'IPv4 出口'; }
+warp_ipv6_exit_ok() { probe_exit_ok -6 'IPv6 出口'; }
+
+warp_needs_action() {
+    warp_installed || { printf 'install\n'; return 0; }
+    warp_is_registered || { printf 'register\n'; return 0; }
+    warp_is_full_tunnel || { printf 'mode\n'; return 0; }
+    warp_connected || { printf 'connect\n'; return 0; }
+    warp_ipv4_exit_ok || { printf 'verify_ipv4\n'; return 0; }
+    printf 'none\n'
+    return 1
+}
+
 warp_register_connect() {
     warp_installed || { fail '尚未安装 warp-cli，请先选择安装。'; return 1; }
     [ "$(id -u)" -eq 0 ] || { fail '注册/连接 WARP 需要 root 权限。'; return 1; }
-    if command -v systemctl >/dev/null 2>&1; then
+    if command -v systemctl >/dev/null 2>&1 && ! warp_service_active; then
         run_systemctl start warp-svc >/dev/null 2>&1 || true
     fi
-    if ! run_warp_cli registration show >/dev/null 2>&1; then
+    if ! warp_is_registered; then
         info '正在创建 WARP 注册（Cloudflare 会生成本机账户）。'
         run_warp_cli registration new || { fail 'WARP 注册失败。'; return 1; }
+    else
+        info '检测到已有 WARP 注册，跳过重复 registration new。'
     fi
+
     # warp mode is full tunnel. Proxy mode would not provide a system IPv4 exit.
-    if ! run_warp_cli mode warp >/dev/null 2>&1; then
+    if warp_is_full_tunnel; then
+        info "检测到已有全隧道模式（$(warp_current_mode)），跳过重复设置。"
+    elif ! run_warp_cli mode warp >/dev/null 2>&1; then
         # Newer clients may expose the full-tunnel profile as warp+doh.
         run_warp_cli mode warp+doh >/dev/null 2>&1 || { fail '无法切换到 WARP 全隧道模式。'; return 1; }
+    else
+        info '已切换到 WARP 全隧道模式。'
     fi
+
+    if warp_connected; then
+        if warp_ipv4_exit_ok; then
+            ok 'WARP 已连接且 IPv4 出口探测正常，无需重复连接。'
+            return 0
+        fi
+        warn 'WARP 显示已连接，但 IPv4 出口探测失败；不会盲目重复连接，请先查看状态或手动断开后重试。'
+        return 1
+    fi
+
     run_warp_cli connect >/dev/null 2>&1 || { fail 'WARP 连接失败；未继续修改 DNS。'; return 1; }
     local i=0
     while [ "$i" -lt 20 ]; do
-        warp_connected && { ok 'WARP 已连接：系统 IPv4 出口应已建立（不是公网 IPv4 地址）。'; return 0; }
+        if warp_connected && warp_ipv4_exit_ok; then
+            ok 'WARP 已连接：系统 IPv4 出口已建立（不是公网 IPv4 地址）。'
+            return 0
+        fi
         sleep 1; i=$((i + 1))
     done
-    fail 'WARP 在 20 秒内未进入 Connected 状态，请执行状态检查后再决定是否重试。'
+    fail 'WARP 在 20 秒内未建立可用 IPv4 出口，请执行状态检查后再决定是否重试。'
     return 1
 }
 
@@ -161,6 +252,18 @@ show_status() {
     fi
     local selected; selected=$(sec_github_selected_endpoint 2>/dev/null || true)
     printf 'GitHub fallback: %s\n' "${selected:-未设置（每次仍优先官方 raw）}"
+    if warp_installed; then
+        local action; action=$(warp_needs_action 2>/dev/null || true)
+        case "$action" in
+            none) ok 'WARP 状态完整：已安装、已注册、全隧道、已连接且 IPv4 出口正常；重复执行会跳过。' ;;
+            install) info 'WARP 尚未安装。' ;;
+            register) info 'WARP 已安装，但尚未注册。' ;;
+            mode) info 'WARP 已注册，但还不是全隧道模式。' ;;
+            connect) info 'WARP 已配置，但当前未连接。' ;;
+            verify_ipv4) warn 'WARP 显示已连接，但 IPv4 出口探测未通过；不会自动重复连接。' ;;
+            *) warn 'WARP 状态暂时无法完整确认。' ;;
+        esac
+    fi
 }
 
 probe_github() {
@@ -193,8 +296,10 @@ select_github() {
     selected="${entries[$((choice - 1))]:-}"
     [ -n "$selected" ] || { fail '输入超出范围。'; return 1; }
     name="${selected%%|*}"
-    if sec_github_probe_named_endpoint "$name"; then
-        sec_github_set_endpoint "$name" && ok "已保存 $(sec_github_endpoint_label "$name") 为 fallback。" || fail '保存失败。'
+    if [ "$(sec_github_selected_endpoint 2>/dev/null || true)" = "$name" ] && sec_github_selected_endpoint_fresh; then
+        ok "已是 $(sec_github_endpoint_label "$name") fallback，缓存仍在有效期内，跳过重复探测和写入。"
+    elif sec_github_prepare_endpoint "$name"; then
+        ok "已保存 $(sec_github_endpoint_label "$name") 为 fallback。"
     else
         warn '该站点当前 IPv6/HTTPS/raw 探测未通过，拒绝保存为默认 fallback。'
     fi

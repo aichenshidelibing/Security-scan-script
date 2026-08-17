@@ -68,6 +68,19 @@ show_dashboard() {
 }
 
 # --- 核心函数：下载 ---
+github_cached_fallback_base() {
+    local file="${SEC_GITHUB_ENDPOINT_FILE:-/etc/sec-toolbox/github-endpoint}" name=""
+    [ -r "$file" ] || return 0
+    IFS= read -r name <"$file" 2>/dev/null || true
+    name=$(printf '%s' "$name" | tr -d '[:space:]')
+    case "$name" in
+        gh-proxy) printf '%s\n' 'https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+        ghproxy) printf '%s\n' 'https://ghproxy.net/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+        ghfast) printf '%s\n' 'https://ghfast.top/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+        gh-proxy-com) printf '%s\n' 'https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+    esac
+}
+
 download_family_args() {
     local mode=""
     if command -v ip >/dev/null 2>&1; then
@@ -80,7 +93,7 @@ download_family_args() {
 }
 
 download_script() {
-    local name="$1" target_family url downloaded=1
+    local name="$1" target_family url downloaded=1 base candidate duplicate
     target_family=$(download_family_args)
     mkdir -p "$(dirname -- "$name")" 2>/dev/null || return 1
     echo -ne "${CYAN}${I_DL} fetching ${name}... ${RESET}"
@@ -88,7 +101,17 @@ download_script() {
     # Official raw is always first. Accelerators are best-effort fallbacks:
     # their IPv6 availability and URL behavior can change, so every request
     # is bounded and the next endpoint is tried automatically.
-    local bases=("$GITHUB_BASE" "$GITHUB_RAW_BASE" "${GITHUB_ACCELERATOR_BASES[@]}")
+    local bases=("$GITHUB_BASE" "$GITHUB_RAW_BASE")
+    candidate=$(github_cached_fallback_base)
+    [ -n "$candidate" ] && bases+=("$candidate")
+    for candidate in "${GITHUB_ACCELERATOR_BASES[@]}"; do
+        [ -n "$candidate" ] || continue
+        duplicate=0
+        for base in "${bases[@]}"; do
+            [ "$base" = "$candidate" ] && duplicate=1 && break
+        done
+        [ "$duplicate" -eq 0 ] && bases+=("$candidate")
+    done
     for base in "${bases[@]}"; do
         url="${base}/${name}"
         rm -f -- "$name"

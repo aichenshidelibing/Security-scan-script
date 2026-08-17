@@ -6,6 +6,7 @@ SEC_GITHUB_OFFICIAL_BASE="${SEC_GITHUB_OFFICIAL_BASE:-https://raw.githubusercont
 SEC_GITHUB_ENDPOINT_FILE="${SEC_GITHUB_ENDPOINT_FILE:-/etc/sec-toolbox/github-endpoint}"
 SEC_GITHUB_PROBE_PATH="${SEC_GITHUB_PROBE_PATH:-aichenshidelibing/Security-scan-script/main/install.sh}"
 SEC_GITHUB_PROBE_MARKER="${SEC_GITHUB_PROBE_MARKER:-<SEC_SCRIPT_MARKER_v2.3>}"
+SEC_GITHUB_CACHE_TTL="${SEC_GITHUB_CACHE_TTL:-600}"
 
 sec_github_family_arg() {
     local mode=""
@@ -37,21 +38,66 @@ sec_github_endpoint_url() {
     printf '%s/%s\n' "$base" "$path"
 }
 
+sec_github_valid_endpoint_name() {
+    local name="${1:-}"
+    [ -n "$name" ] || return 1
+    sec_github_entry_for_name "$name" | grep -Fq -- '|'
+}
+
+sec_github_cache_file() {
+    printf '%s.cache\n' "$SEC_GITHUB_ENDPOINT_FILE"
+}
+
 sec_github_selected_endpoint() {
+    local name=""
     [ -r "$SEC_GITHUB_ENDPOINT_FILE" ] || return 0
-    tr -d '[:space:]' <"$SEC_GITHUB_ENDPOINT_FILE" 2>/dev/null | head -n 1
+    IFS= read -r name <"$SEC_GITHUB_ENDPOINT_FILE" 2>/dev/null || true
+    name=$(printf '%s' "$name" | tr -d '[:space:]')
+    sec_github_valid_endpoint_name "$name" && printf '%s\n' "$name"
 }
 
 sec_github_set_endpoint() {
-    local name="$1" dir
-    case "$name" in
-        official|gh-proxy|ghproxy|ghfast|gh-proxy-com) ;;
-        *) return 2 ;;
-    esac
+    local name="${1:-}" dir tmp current
+    sec_github_valid_endpoint_name "$name" || return 2
+    current=$(sec_github_selected_endpoint)
+    # Idempotent: do not rewrite a valid, already selected endpoint.
+    [ "$current" = "$name" ] && return 0
     dir=$(dirname -- "$SEC_GITHUB_ENDPOINT_FILE")
     mkdir -p "$dir" 2>/dev/null || return 1
-    printf '%s\n' "$name" >"$SEC_GITHUB_ENDPOINT_FILE" || return 1
+    tmp="${SEC_GITHUB_ENDPOINT_FILE}.tmp.$$.$RANDOM"
+    (umask 077; printf '%s\n' "$name" >"$tmp") || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$SEC_GITHUB_ENDPOINT_FILE" || { rm -f -- "$tmp"; return 1; }
     chmod 0644 "$SEC_GITHUB_ENDPOINT_FILE" 2>/dev/null || true
+}
+
+sec_github_mark_endpoint_checked() {
+    local name="${1:-}" cache tmp now
+    sec_github_valid_endpoint_name "$name" || return 2
+    cache=$(sec_github_cache_file)
+    mkdir -p "$(dirname -- "$cache")" 2>/dev/null || return 1
+    now=$(date +%s 2>/dev/null) || return 1
+    tmp="${cache}.tmp.$$.$RANDOM"
+    (umask 077; printf '%s|%s\n' "$name" "$now" >"$tmp") || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$cache" || { rm -f -- "$tmp"; return 1; }
+    chmod 0644 "$cache" 2>/dev/null || true
+}
+
+sec_github_selected_endpoint_fresh() {
+    local selected cache cache_name timestamp now age
+    selected=$(sec_github_selected_endpoint)
+    [ -n "$selected" ] || return 1
+    case "$SEC_GITHUB_CACHE_TTL" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    cache=$(sec_github_cache_file)
+    [ -r "$cache" ] || return 1
+    IFS='|' read -r cache_name timestamp <"$cache" 2>/dev/null || return 1
+    [ "$cache_name" = "$selected" ] || return 1
+    [[ "$timestamp" =~ ^[0-9]+$ ]] || return 1
+    now=$(date +%s 2>/dev/null) || return 1
+    [ "$now" -ge "$timestamp" ] || return 1
+    age=$((now - timestamp))
+    [ "$age" -le "$SEC_GITHUB_CACHE_TTL" ]
 }
 
 sec_github_entry_for_name() {
@@ -65,7 +111,7 @@ sec_github_fetch() {
     [ -n "$path" ] && [ -n "$output" ] || return 2
     family=$(sec_github_family_arg)
     mkdir -p "$(dirname -- "$output")" 2>/dev/null || return 1
-    tmp="${output}.tmp.$$"
+    tmp="${output}.tmp.$$.$RANDOM"
 
     local entries=()
     entries+=("official|$SEC_GITHUB_OFFICIAL_BASE")
@@ -85,6 +131,7 @@ sec_github_fetch() {
     done < <(sec_github_endpoint_entries)
 
     for entry in "${entries[@]}"; do
+        name="${entry%%|*}"
         url=$(sec_github_endpoint_url "$entry" "$path")
         rm -f -- "$tmp"
         if command -v curl >/dev/null 2>&1; then
@@ -107,6 +154,12 @@ sec_github_fetch() {
             continue
         fi
         mv -f -- "$tmp" "$output"
+        if [ "$name" != official ]; then
+            # A working fallback becomes the next preferred fallback. Failure to
+            # persist it must never turn a successful download into a failure.
+            sec_github_set_endpoint "$name" >/dev/null 2>&1 || true
+            sec_github_mark_endpoint_checked "$name" >/dev/null 2>&1 || true
+        fi
         status=0
         break
     done
@@ -115,12 +168,14 @@ sec_github_fetch() {
 }
 
 sec_github_probe_endpoint() {
-    sec_github_probe_named_endpoint "$1"
+    sec_github_probe_named_endpoint "${1:-}" "${2:-}" "${3:-}"
 }
 
 sec_github_probe_named_endpoint() {
     # Probe one exact endpoint without changing the configured fallback.
-    local name="$1" path="$2" expected="${3:-}" entry url family tmp
+    # Keep optional parameters nounset-safe: callers commonly provide only the name.
+    local name="${1:-}" path="${2:-}" expected="${3:-}" entry url family tmp
+    [ -n "$name" ] || return 2
     entry=$(sec_github_entry_for_name "$name")
     [ -n "$entry" ] || return 2
     path="${path:-$SEC_GITHUB_PROBE_PATH}"
@@ -144,6 +199,19 @@ sec_github_probe_named_endpoint() {
     local result=$?
     rm -f -- "$tmp"
     return "$result"
+}
+
+sec_github_prepare_endpoint() {
+    # Validate and persist a selected endpoint once. A fresh cache avoids a
+    # second network probe when the same choice is selected repeatedly.
+    local name="$1"
+    sec_github_valid_endpoint_name "$name" || return 2
+    if [ "$(sec_github_selected_endpoint)" = "$name" ] && sec_github_selected_endpoint_fresh; then
+        return 0
+    fi
+    sec_github_probe_named_endpoint "$name" || return 1
+    sec_github_set_endpoint "$name" || return 1
+    sec_github_mark_endpoint_checked "$name" || return 1
 }
 
 sec_github_endpoint_label() {
