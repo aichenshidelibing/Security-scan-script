@@ -28,10 +28,10 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 
   sec_github_prepare_endpoint gh-proxy 2>"$STDERR_LOG" || fail 'first endpoint preparation failed'
   [ ! -s "$STDERR_LOG" ] || fail 'endpoint preparation emitted an unbound-variable error'
-  [ "$(wc -l <"$CURL_CALLS")" -eq 1 ] || fail 'first preparation should probe once'
+  [ "$(wc -l <"$CURL_CALLS")" -eq 3 ] || fail 'first preparation should probe three rounds'
   [ "$(cat "$SEC_GITHUB_ENDPOINT_FILE")" = 'gh-proxy' ] || fail 'selected endpoint was not persisted'
   sec_github_prepare_endpoint gh-proxy 2>"$STDERR_LOG" || fail 'cached endpoint preparation failed'
   [ ! -s "$STDERR_LOG" ] || fail 'cached endpoint preparation emitted an error'
-  [ "$(wc -l <"$CURL_CALLS")" -eq 1 ] || fail 'fresh cached endpoint was probed again'
+  [ "$(wc -l <"$CURL_CALLS")" -eq 3 ] || fail 'fresh cached endpoint was probed again'
 )
 printf 'PASS: GitHub endpoint configuration is validated, cached, and idempotent\n'

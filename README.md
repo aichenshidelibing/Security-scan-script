@@ -180,34 +180,50 @@ APT 源优化会备份 `/etc/apt/sources.list` 到：
 
 ## 纯 IPv6 出口与 GitHub 加速中心（v4.sh）
 
-`v4.sh` 不会在启动时安装、注册或连接 WARP，也不会自动改写 DNS。所有会改变网络路由的动作都在菜单中单独确认。
+`v4.sh` 不会在启动时安装、注册或连接 WARP，也不会自动改写 DNS。所有会改变网络路由的动作都必须由用户在菜单中明确选择，并且每个网络命令都有超时。
 
-### Cloudflare WARP
+### Cloudflare WARP 两种系统出口模式
 
-- 安装阶段只使用 Cloudflare 官方软件源 `pkg.cloudflareclient.com`；Debian/Ubuntu 通过现有包管理器锁串行执行 APT。
-- “注册并连接”使用 **WARP 全隧道模式**，用于提供系统级 IPv4 出口；`warp-cli mode proxy` 只提供本地代理，不能当作系统 IPv4 出口，所以本项目不把它作为默认修复方案。
-- WARP 提供的是共享的 IPv4 出口，不是给 VPS 分配一个可入站访问的公网 IPv4 地址；SSH 入站仍依赖原有 IPv6 地址。
-- WARP 可能改变默认路由、影响 SSH、云安全组、源站访问和已有防火墙策略。连接前请保留当前 SSH 会话，并准备 `v4.sh` 的“断开 WARP”或控制台回滚方案。
-- 安装 WARP 需要主机先能通过 IPv6 访问 Cloudflare 官方软件源；如果本机连 IPv6 默认路由都没有，脚本不会伪造修复，而是明确报错。
-- 安装、连接和状态探测都有超时，不会无限等待。连接后仍会分别检查 IPv4 和 IPv6，避免把“IPv4 已恢复”误报成“IPv6 也正常”。
-- WARP 使用幂等状态机：依次检查“已安装 → 已注册 → 全隧道模式 → 已连接 → IPv4 出口正常”；全部满足时再次执行会直接跳过，不会重复注册、重复切换模式或重复连接。若显示 Connected 但 IPv4 出口探测失败，只提示异常，不会盲目反复重连。
+- **全隧道**：IPv4 和 IPv6 都交给 WARP，适合只需要系统级 IPv4 出口、且接受 IPv6 也经 WARP 的场景。
+- **IPv4-only / 部分接管**：仍使用 WARP 全隧道配置，但通过当前 `warp-cli` 实际公开的分流命令加入 IPv6 `::/0` 排除路由；结果是 IPv4 走 WARP，IPv6 保留 VPS 原生出口。脚本不会凭猜测写路由：先检查 `warp-cli help` 是否支持 `tunnel ip`（旧版本若公开 `add-excluded-route` 也兼容），不支持时直接拒绝修改。
+- 选中全隧道时会先检测并移除 IPv4-only 的 IPv6 排除路由；重复执行 IPv4-only 时会检测已有 `::/0`，不会重复添加。
+- 状态检测会区分“已注册、全隧道、已连接、IPv4 出口正常、IPv4-only 分流已存在”，不会把一次失败变成无限重连，也不会自动修改 DNS。
+- WARP 提供共享 IPv4 出口，不是入站公网 IPv4；SSH 入站仍依赖原有 IPv6。连接前请保留当前 SSH 会话和控制台回滚路径。
 
-### GitHub 加速 fallback
+### GitHub 中转站与下载优先级
 
-下载顺序固定为：
+GitHub 下载现在按下面顺序处理：
 
-1. `raw.githubusercontent.com` 官方 raw；
-2. 已保存且当前可探测的 fallback；
-3. 其他候选站点。
+1. 已保存并通过检测的多个 GitHub 中转站，按优先级依次尝试；
+2. 当前地址族可用的其他中转站；
+3. GitHub 官方 raw / GitHub 原始地址作为**最后备选**。
 
-当前候选包括 `gh-proxy.org`、`ghproxy.net`、`ghfast.top` 和 `gh-proxy.com`。它们都是**动态探测候选**，不是永久承诺：域名解析、IPv6、证书、限流和 URL 格式都可能改变。`v4.sh` 会对仓库 `install.sh` 的特征码执行 HTTPS + IPv6 探测，只有探测通过才允许保存。纯 IPv6 主机请求会强制传递 `curl -6` / `wget -6`；官方 raw 永远保留第一优先级。
-- 已选择的 fallback 保存在 `/etc/sec-toolbox/github-endpoint`，探测时间保存在同名 `.cache` 文件，默认 10 分钟内再次选择同一站点会跳过重复探测和写入。
-- `install.sh` 的最早期 bootstrap 下载也会读取这个已验证的 fallback；官方 raw 失败时优先复用它，再尝试其他候选。某次实际下载成功后会原子更新选择和探测时间。
+已加入并按 URL 形态处理的候选包括：
 
-请不要把加速站当作 GitHub 权威来源，也不要把未通过探测的站点硬编码成唯一下载地址。对于敏感更新，建议优先固定提交版本并核对脚本特征码或哈希。
+- `gh-proxy.com`
+- `gh-proxy.org`
+- `v4.gh-proxy.org`（仅 IPv4）
+- `v6.gh-proxy.org`（仅 IPv6）
+- `cdn.gh-proxy.org`
+- `axisnow.gh-proxy.org`
+- 原有 `ghproxy.net`、`ghfast.top`
 
-### 这两个“方案”的边界
+`axisnow` 等站点不再被当成统一固定前缀：下载函数支持将 raw 路径转换为完整 `https://raw.githubusercontent.com/...` URL，也支持直接传入 GitHub release 完整 URL，例如用户提供的 frp release 示例。不同中转站格式如有变化，会因为特征码校验失败而被跳过，不会把 HTML 错误页当成脚本。
 
-- WARP 解决的是“主机没有 IPv4 出口”这一网络路径问题；它不能保证所有服务都允许 WARP 出口，也不能提供入站公网 IPv4。
-- GitHub 加速解决的是“当前 IPv6 到 GitHub raw 不稳定/不可达”的下载路径问题；它不能修复本机 DNS、云厂商安全组或上游 IPv6 路由。
-- 如果 WARP 已连接但 GitHub 仍失败，`v4.sh` 会分别探测 IPv4/IPv6 和各 raw endpoint，避免将不同原因混成 `DNS(阻断)`。
+### 多轮检测、自动选择与幂等缓存
+
+- 默认每个候选检测 **3 轮**，至少成功 **2 轮**才算可用；可用环境变量 `SEC_GITHUB_PROBE_ROUNDS`、`SEC_GITHUB_PROBE_MIN_SUCCESS` 调整。
+- 检测不是只看 HTTP 200：必须下载仓库 `install.sh` 并匹配 `<SEC_SCRIPT_MARKER_v2.3>` 特征码；纯 IPv6 主机会强制 `curl -6` / `wget -6`。
+- 自动选择会先按当前 IPv4/IPv6 地址族过滤，再按多轮成功次数排序；成功次数相同时保留内置优先级。它会把所有达到最低成功次数的中转保存为优先级列表，而不是只保存一个站点。
+- 手动选择支持逗号分隔的多个编号，例如 `2,4,6`；官方 raw 固定作为最后备选，不能被保存成中转优先级。
+- `/etc/sec-toolbox/github-endpoint` 保存中转优先级列表；同名 `.cache` 保存最近验证时间。缓存有效期默认 600 秒，重复运行会跳过不必要的探测和写入；下载成功后会原子更新成功站点到优先位置。
+- `install.sh` 的最早期 bootstrap 也读取这个列表，因此在 `lib/github.sh` 尚未下载时，纯 IPv6 拉取 `v0.sh`～`v4.sh` 和公共库仍能复用已验证中转。
+
+菜单新增：
+
+- `IPv4-only WARP`
+- `多轮探测 GitHub 中转站`
+- `手动选择多个 GitHub 中转优先级`
+- `自动选择可用 GitHub 中转（多轮）`
+
+请不要把公共中转站当成 GitHub 权威来源。生产环境建议固定提交版本，并继续核对脚本特征码或哈希。

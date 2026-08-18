@@ -10,12 +10,17 @@ FORCE_TEXT_MODE=0
 
 # --- 配置 ---
 GITHUB_BASE="https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
-GITHUB_FALLBACK_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+GITHUB_FALLBACK_BASE="https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+# Bootstrap candidates mirror lib/github.sh. They are tried before official GitHub.
 GITHUB_ACCELERATOR_BASES=(
     "$GITHUB_FALLBACK_BASE"
+    "https://v6.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+    "https://cdn.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+    "https://axisnow.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+    "https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
+    "https://v4.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
     "https://ghproxy.net/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
     "https://ghfast.top/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
-    "https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
 )
 GITHUB_RAW_BASE="https://github.com/aichenshidelibing/Security-scan-script/raw/refs/heads/main"
 TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>" # 唯一特征识别码
@@ -69,18 +74,23 @@ show_dashboard() {
 
 # --- 核心函数：下载 ---
 github_cached_fallback_base() {
-    local file="${SEC_GITHUB_ENDPOINT_FILE:-/etc/sec-toolbox/github-endpoint}" name=""
+    local file="${SEC_GITHUB_ENDPOINT_FILE:-/etc/sec-toolbox/github-endpoint}" name
     [ -r "$file" ] || return 0
-    IFS= read -r name <"$file" 2>/dev/null || true
-    name=$(printf '%s' "$name" | tr -d '[:space:]')
-    case "$name" in
-        gh-proxy) printf '%s\n' 'https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
-        ghproxy) printf '%s\n' 'https://ghproxy.net/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
-        ghfast) printf '%s\n' 'https://ghfast.top/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
-        gh-proxy-com) printf '%s\n' 'https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
-    esac
+    while IFS= read -r name; do
+        name=$(printf '%s' "$name" | tr -d '[:space:]')
+        case "$name" in
+            gh-proxy-org) printf '%s\n' 'https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            gh-proxy-v4) printf '%s\n' 'https://v4.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            gh-proxy-v6) printf '%s\n' 'https://v6.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            gh-proxy-cdn) printf '%s\n' 'https://cdn.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            axisnow) printf '%s\n' 'https://axisnow.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            gh-proxy-com) printf '%s\n' 'https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            gh-proxy) printf '%s\n' 'https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            ghproxy) printf '%s\n' 'https://ghproxy.net/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+            ghfast) printf '%s\n' 'https://ghfast.top/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main' ;;
+        esac
+    done <"$file"
 }
-
 download_family_args() {
     local mode=""
     if command -v ip >/dev/null 2>&1; then
@@ -93,25 +103,27 @@ download_family_args() {
 }
 
 download_script() {
-    local name="$1" target_family url downloaded=1 base candidate duplicate
+    local name="$1" target_family url downloaded=0 base candidate duplicate
     target_family=$(download_family_args)
     mkdir -p "$(dirname -- "$name")" 2>/dev/null || return 1
     echo -ne "${CYAN}${I_DL} fetching ${name}... ${RESET}"
 
-    # Official raw is always first. Accelerators are best-effort fallbacks:
-    # their IPv6 availability and URL behavior can change, so every request
-    # is bounded and the next endpoint is tried automatically.
-    local bases=("$GITHUB_BASE" "$GITHUB_RAW_BASE")
-    candidate=$(github_cached_fallback_base)
-    [ -n "$candidate" ] && bases+=("$candidate")
+    # Prefer validated/configured accelerators; official GitHub is last.
+    local bases=()
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        duplicate=0
+        for base in "${bases[@]}"; do [ "$base" = "$candidate" ] && duplicate=1 && break; done
+        [ "$duplicate" -eq 0 ] && bases+=("$candidate")
+    done < <(github_cached_fallback_base)
     for candidate in "${GITHUB_ACCELERATOR_BASES[@]}"; do
         [ -n "$candidate" ] || continue
         duplicate=0
-        for base in "${bases[@]}"; do
-            [ "$base" = "$candidate" ] && duplicate=1 && break
-        done
+        for base in "${bases[@]}"; do [ "$base" = "$candidate" ] && duplicate=1 && break; done
         [ "$duplicate" -eq 0 ] && bases+=("$candidate")
     done
+    bases+=("$GITHUB_BASE" "$GITHUB_RAW_BASE")
+
     for base in "${bases[@]}"; do
         url="${base}/${name}"
         rm -f -- "$name"
@@ -128,11 +140,17 @@ download_script() {
                 wget -q -O "$name" --timeout=8 --tries=2 "$url" >/dev/null 2>&1
             fi
         else
-            downloaded=0
             break
         fi
-        if [ -s "$name" ]; then downloaded=1; break; fi
-        downloaded=0
+        if [ -s "$name" ]; then
+            # Reject an HTML error page from a proxy when downloading scripts.
+            if [[ "$name" == *.sh ]] && ! grep -Fq -- "$TAG_MARKER" "$name" 2>/dev/null; then
+                rm -f -- "$name"
+                continue
+            fi
+            downloaded=1
+            break
+        fi
     done
 
     if [ "$downloaded" -eq 1 ] && [ -s "$name" ]; then
@@ -145,7 +163,6 @@ download_script() {
     echo -e "${RED}failed (no IPv4/IPv6-compatible endpoint succeeded)${RESET}"
     return 1
 }
-
 download_runtime_libs() {
     download_script "lib/runtime.sh" || return 1
     download_script "lib/network_checks.sh" || return 1

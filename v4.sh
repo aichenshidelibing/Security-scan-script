@@ -21,24 +21,25 @@ warn() { printf '%s[注意]%s %s\n' "$YELLOW" "$RESET" "$*"; }
 info() { printf '%s[信息]%s %s\n' "$CYAN" "$RESET" "$*"; }
 
 sec_v4_timeout() {
-    # Never wait forever, even when the minimal image lacks coreutils timeout.
+    # Never wait forever, but do not impose a full one-second delay on every
+    # short-lived warp-cli call in minimal images.
     local seconds="$1"; shift
     "$@" &
-    local pid=$! elapsed=0
+    local pid=$! started now
+    started=$(date +%s 2>/dev/null || printf '0')
     while kill -0 "$pid" 2>/dev/null; do
-        if [ "$elapsed" -ge "$seconds" ]; then
+        now=$(date +%s 2>/dev/null || printf '%s' "$started")
+        if [ "$now" -ge "$started" ] && [ $((now - started)) -ge "$seconds" ]; then
             kill "$pid" 2>/dev/null || true
-            sleep 1
+            sleep 0.1
             kill -9 "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
             return 124
         fi
-        sleep 1
-        elapsed=$((elapsed + 1))
+        sleep 0.1
     done
     wait "$pid"
 }
-
 warp_installed() { command -v warp-cli >/dev/null 2>&1; }
 warp_status_text() { warp-cli status 2>/dev/null || true; }
 warp_connected() { warp_status_text | grep -Eiq '(^|[[:space:]:])connected([[:space:]]|$)|已连接'; }
@@ -96,6 +97,61 @@ curl_family() {
 }
 
 run_warp_cli() { sec_v4_timeout 25 warp-cli "$@"; }
+warp_cli_help_text() {
+    warp_installed || return 1
+    run_warp_cli help 2>&1
+    run_warp_cli tunnel ip help 2>&1 || true
+}
+
+warp_split_route_style() {
+    local help
+    help=$(warp_cli_help_text 2>/dev/null || true)
+    if printf '%s\n' "$help" | grep -Eq 'tunnel[[:space:]]+ip[[:space:]]+add'; then
+        printf 'tunnel_ip\n'
+    elif printf '%s\n' "$help" | grep -Eq 'add-excluded-route'; then
+        printf 'excluded_route\n'
+    else
+        printf 'unsupported\n'
+    fi
+}
+
+warp_split_routes_text() {
+    case "$(warp_split_route_style)" in
+        tunnel_ip) run_warp_cli tunnel ip list 2>&1 || true ;;
+        excluded_route) run_warp_cli get-excluded-routes 2>&1 || true ;;
+        *) return 1 ;;
+    esac
+}
+
+warp_ipv4_only_supported() {
+    [ "$(warp_split_route_style)" != unsupported ]
+}
+
+warp_ipv4_only_configured() {
+    local routes normalized
+    routes=$(warp_split_routes_text 2>/dev/null || true)
+    normalized=$(printf '%s\n' "$routes" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    printf '%s\n' "$normalized" | grep -Eq '(^|[^0-9a-f:])(::/0|0:0:0:0:0:0:0:0/0)([^0-9a-f:]|$)'
+}
+
+warp_add_ipv6_exclusion() {
+    warp_ipv4_only_supported || { fail '当前 warp-cli 未公开 IPv4-only 分流命令，拒绝猜测写入路由。'; return 1; }
+    warp_ipv4_only_configured && { info '检测到已有 IPv6 排除路由 ::/0，跳过重复配置。'; return 0; }
+    case "$(warp_split_route_style)" in
+        tunnel_ip) run_warp_cli tunnel ip add ::/0 >/dev/null 2>&1 ;;
+        excluded_route) run_warp_cli add-excluded-route ::/0 >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+warp_remove_ipv6_exclusion() {
+    warp_ipv4_only_configured || return 0
+    case "$(warp_split_route_style)" in
+        tunnel_ip) run_warp_cli tunnel ip delete ::/0 >/dev/null 2>&1 || run_warp_cli tunnel ip del ::/0 >/dev/null 2>&1 ;;
+        excluded_route) run_warp_cli remove-excluded-route ::/0 >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
 run_systemctl() { sec_v4_timeout 25 systemctl "$@"; }
 warp_service_active() {
     command -v systemctl >/dev/null 2>&1 || return 1
@@ -190,6 +246,8 @@ warp_register_connect() {
     fi
 
     # warp mode is full tunnel. Proxy mode would not provide a system IPv4 exit.
+    # Returning to full tunnel removes the IPv6 exclusion used by IPv4-only mode.
+    warp_remove_ipv6_exclusion >/dev/null 2>&1 || true
     if warp_is_full_tunnel; then
         info "检测到已有全隧道模式（$(warp_current_mode)），跳过重复设置。"
     elif ! run_warp_cli mode warp >/dev/null 2>&1; then
@@ -221,6 +279,45 @@ warp_register_connect() {
     return 1
 }
 
+
+warp_register_connect_ipv4_only() {
+    warp_installed || { fail '尚未安装 warp-cli，请先选择安装。'; return 1; }
+    [ "$(id -u)" -eq 0 ] || { fail '注册/连接 WARP 需要 root 权限。'; return 1; }
+    if command -v systemctl >/dev/null 2>&1 && ! warp_service_active; then
+        run_systemctl start warp-svc >/dev/null 2>&1 || true
+    fi
+    if ! warp_is_registered; then
+        info '正在创建 WARP 注册（Cloudflare 会生成本机账户）。'
+        run_warp_cli registration new || { fail 'WARP 注册失败。'; return 1; }
+    else
+        info '检测到已有 WARP 注册，跳过重复 registration new。'
+    fi
+    if warp_is_full_tunnel; then
+        info "检测到已有全隧道模式（$(warp_current_mode)），跳过重复设置。"
+    elif ! run_warp_cli mode warp >/dev/null 2>&1; then
+        run_warp_cli mode warp+doh >/dev/null 2>&1 || { fail '无法切换到 WARP 全隧道模式。'; return 1; }
+    fi
+    warp_add_ipv6_exclusion || { fail 'IPv4-only 分流配置失败；未继续连接。'; return 1; }
+    if warp_connected; then
+        if warp_ipv4_exit_ok; then
+            ok 'WARP IPv4-only 已连接；IPv4 走 WARP，IPv6 保留原 VPS 出口。'
+            return 0
+        fi
+        warn 'WARP 显示已连接，但 IPv4 出口探测失败；不会盲目重复连接。'
+        return 1
+    fi
+    run_warp_cli connect >/dev/null 2>&1 || { fail 'WARP 连接失败；未修改 DNS。'; return 1; }
+    local i=0
+    while [ "$i" -lt 20 ]; do
+        if warp_connected && warp_ipv4_exit_ok; then
+            ok 'WARP IPv4-only 已连接；IPv4 走 WARP，IPv6 保留原 VPS 出口。'
+            return 0
+        fi
+        sleep 1; i=$((i + 1))
+    done
+    fail 'WARP IPv4-only 在 20 秒内未建立可用 IPv4 出口，请执行状态检查后再决定是否重试。'
+    return 1
+}
 warp_disconnect() {
     warp_installed || { info 'warp-cli 未安装。'; return 0; }
     run_warp_cli disconnect >/dev/null 2>&1 && ok 'WARP 已断开。' || fail 'WARP 断开失败，请检查 warp-cli status。'
@@ -250,12 +347,30 @@ show_status() {
     else
         printf 'WARP: 未安装\n'
     fi
-    local selected; selected=$(sec_github_selected_endpoint 2>/dev/null || true)
-    printf 'GitHub fallback: %s\n' "${selected:-未设置（每次仍优先官方 raw）}"
+    local github_priority="" name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        [ -n "$github_priority" ] && github_priority+=" -> "
+        github_priority+="$(sec_github_endpoint_label "$name")"
+    done < <(sec_github_selected_endpoints 2>/dev/null || true)
+    printf 'GitHub fallback: %s\n' "${github_priority:-未设置（中转优先，官方 raw 最后备选）}"
     if warp_installed; then
+        if warp_ipv4_only_configured; then
+            info 'WARP 部分接管已配置：仅 IPv4 请求走 WARP，IPv6 请求保留 VPS 原生出口。'
+        elif warp_ipv4_only_supported; then
+            info '当前 warp-cli 支持 IPv4-only 分流；尚未检测到 IPv6 ::/0 排除路由。'
+        else
+            warn '当前 warp-cli 未公开可验证的 IPv4-only 分流命令；不会猜测修改路由。'
+        fi
         local action; action=$(warp_needs_action 2>/dev/null || true)
         case "$action" in
-            none) ok 'WARP 状态完整：已安装、已注册、全隧道、已连接且 IPv4 出口正常；重复执行会跳过。' ;;
+            none)
+                if warp_ipv4_only_configured; then
+                    ok 'WARP 状态完整：已安装、已注册、IPv4-only 分流、已连接且 IPv4 出口正常；IPv6 保持原生出口，重复执行会跳过。'
+                else
+                    ok 'WARP 状态完整：已安装、已注册、全隧道、已连接且 IPv4 出口正常；重复执行会跳过。'
+                fi
+                ;;
             install) info 'WARP 尚未安装。' ;;
             register) info 'WARP 已安装，但尚未注册。' ;;
             mode) info 'WARP 已注册，但还不是全隧道模式。' ;;
@@ -267,20 +382,33 @@ show_status() {
 }
 
 probe_github() {
-    command -v sec_github_endpoint_entries >/dev/null 2>&1 || { fail '缺少 lib/github.sh。'; return 1; }
-    local entry name result
-    echo '按当前网络逐个探测 GitHub raw endpoint（每个最多 8 秒）：'
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        name="${entry%%|*}"
-        if sec_github_probe_named_endpoint "$name"; then result='可用'; else result='不可用/未验证'; fi
-        printf '  %-14s %s\n' "$(sec_github_endpoint_label "$name")" "$result"
-    done < <(sec_github_endpoint_entries)
+    command -v sec_github_probe_all >/dev/null 2>&1 || { fail '缺少 lib/github.sh。'; return 1; }
+    echo "按当前网络逐个探测 GitHub endpoint（默认 3 轮，成功至少 2 轮才算可用）："
+    local result name success rounds
+    while IFS='|' read -r name success rounds; do
+        [ -n "$name" ] || continue
+        if [ "${success:-0}" -ge "${SEC_GITHUB_PROBE_MIN_SUCCESS:-2}" ] 2>/dev/null; then
+            result='可用'
+        else
+            result='不可用/未达最低成功次数'
+        fi
+        printf '  %-28s %s（%s/%s）\n' "$(sec_github_endpoint_label "$name")" "$result" "$success" "$rounds"
+    done < <(sec_github_probe_all)
+}
+
+auto_select_github() {
+    command -v sec_github_auto_select >/dev/null 2>&1 || { fail '缺少 lib/github.sh。'; return 1; }
+    if sec_github_auto_select; then
+        ok "已自动选择可用 GitHub 中转优先级：$(tr '\n' ' ' <"$SEC_GITHUB_ENDPOINT_FILE")"
+    else
+        warn '没有任何中转站达到最低成功次数；保留官方 GitHub raw 作为最后备选。'
+        return 1
+    fi
 }
 
 select_github() {
     command -v sec_github_endpoint_entries >/dev/null 2>&1 || { fail '缺少 lib/github.sh。'; return 1; }
-    local entries=() entry name i=1 choice selected
+    local entries=() entry name i=1 choice selected_names=() item index
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
         entries+=("$entry")
@@ -288,33 +416,46 @@ select_github() {
         printf ' [%s] %s\n' "$i" "$(sec_github_endpoint_label "$name")"
         i=$((i + 1))
     done < <(sec_github_endpoint_entries)
-    printf ' [q] 取消\n选择要保存的 fallback（官方 raw 仍然第一优先）: '
+    printf ' [a] 自动选择（多轮检测后保存全部可用中转的优先级）\n'
+    printf ' [q] 取消\n选择一个或多个中转编号（如 2,4,6；官方 raw 始终最后备选）: '
     read -r choice
     [ "$choice" = q ] || [ "$choice" = Q ] && return 0
-    [[ "$choice" =~ ^[0-9]+$ ]] || { fail '输入无效。'; return 1; }
-    [ "$choice" -ge 1 ] && [ "$choice" -le "${#entries[@]}" ] || { fail '输入超出范围。'; return 1; }
-    selected="${entries[$((choice - 1))]:-}"
-    [ -n "$selected" ] || { fail '输入超出范围。'; return 1; }
-    name="${selected%%|*}"
-    if [ "$(sec_github_selected_endpoint 2>/dev/null || true)" = "$name" ] && sec_github_selected_endpoint_fresh; then
-        ok "已是 $(sec_github_endpoint_label "$name") fallback，缓存仍在有效期内，跳过重复探测和写入。"
-    elif sec_github_prepare_endpoint "$name"; then
-        ok "已保存 $(sec_github_endpoint_label "$name") 为 fallback。"
-    else
-        warn '该站点当前 IPv6/HTTPS/raw 探测未通过，拒绝保存为默认 fallback。'
-    fi
+    if [ "$choice" = a ] || [ "$choice" = A ]; then auto_select_github; return $?; fi
+    [ -n "$choice" ] || { fail '输入无效。'; return 1; }
+    IFS=',' read -ra selected_names <<< "$choice"
+    local selected_count=0
+    local resolved=()
+    for item in "${selected_names[@]}"; do
+        item=$(printf '%s' "$item" | tr -d '[:space:]')
+        [[ "$item" =~ ^[0-9]+$ ]] || { fail '输入无效：请输入逗号分隔的编号。'; return 1; }
+        index=$((item - 1))
+        [ "$index" -ge 0 ] && [ "$index" -lt "${#entries[@]}" ] || { fail '输入超出范围。'; return 1; }
+        name="${entries[$index]%%|*}"
+        [ "$name" != official ] || { fail '官方 raw 固定为最后备选，不能加入中转优先级。'; return 1; }
+        resolved+=("$name")
+        selected_count=$((selected_count + 1))
+    done
+    [ "$selected_count" -gt 0 ] || { fail '至少选择一个中转站。'; return 1; }
+    local valid=()
+    for name in "${resolved[@]}"; do
+        if sec_github_prepare_endpoint "$name"; then valid+=("$name"); else warn "$(sec_github_endpoint_label "$name") 未通过多轮探测，跳过。"; fi
+    done
+    [ "${#valid[@]}" -gt 0 ] || { fail '没有选中的中转站通过验证。'; return 1; }
+    sec_github_set_endpoints "${valid[@]}" || { fail '保存 GitHub 中转优先级失败。'; return 1; }
+    ok "已保存 GitHub 中转优先级：${valid[*]}；官方 raw 保留为最后备选。"
 }
-
 menu() {
     while true; do
         echo ''
         echo '========== IPv6 出口 / WARP / GitHub 加速中心 =========='
         echo ' [1] 查看当前 IPv4/IPv6 出口与 WARP 状态'
         echo ' [2] 安装 Cloudflare WARP 官方软件包（不连接）'
-        echo ' [3] 注册并连接 WARP 全隧道（提供 IPv4 出口）'
-        echo ' [4] 断开 WARP'
-        echo ' [5] 探测当前可用的 GitHub raw endpoint'
-        echo ' [6] 设置 GitHub fallback（只保存已探测可用站点）'
+        echo ' [3] 注册并连接 WARP 全隧道（IPv4/IPv6 都走 WARP）'
+        echo ' [4] 注册并连接 WARP IPv4-only（IPv4 走 WARP，IPv6 保持原出口）'
+        echo ' [5] 断开 WARP'
+        echo ' [6] 多轮探测 GitHub 中转站'
+        echo ' [7] 手动选择多个 GitHub 中转优先级'
+        echo ' [8] 自动选择可用 GitHub 中转（多轮）'
         echo ' [q] 返回主菜单'
         printf '请选择: '
         read -r choice
@@ -322,9 +463,11 @@ menu() {
             1) show_status; read -r -p '按回车返回...' _ ;;
             2) warp_install; read -r -p '按回车返回...' _ ;;
             3) warp_register_connect; read -r -p '按回车返回...' _ ;;
-            4) warp_disconnect; read -r -p '按回车返回...' _ ;;
-            5) probe_github; read -r -p '按回车返回...' _ ;;
-            6) select_github; read -r -p '按回车返回...' _ ;;
+            4) warp_register_connect_ipv4_only; read -r -p '按回车返回...' _ ;;
+            5) warp_disconnect; read -r -p '按回车返回...' _ ;;
+            6) probe_github; read -r -p '按回车返回...' _ ;;
+            7) select_github; read -r -p '按回车返回...' _ ;;
+            8) auto_select_github; read -r -p '按回车返回...' _ ;;
             q|Q) return 0 ;;
         esac
     done
