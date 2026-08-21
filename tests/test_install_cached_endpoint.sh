@@ -7,7 +7,7 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 (
   set -u
   cd "$TEST_TMP" || exit 1
-  source <(sed '/^# --- 前置检查 ---/,$d' "$ROOT_DIR/install.sh")
+  SEC_TOOLBOX_NO_MAIN=1 source "$ROOT_DIR/install.sh"
   SEC_GITHUB_ENDPOINT_FILE="$TEST_TMP/selected"
   printf 'ghfast\n' >"$SEC_GITHUB_ENDPOINT_FILE"
   ip() {

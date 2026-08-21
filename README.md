@@ -28,6 +28,7 @@ chmod +x install.sh
 ```
 
 > 纯 IPv6 主机可以把上述 `wget` 改为 `wget -6`；如果使用 curl，请显式使用 `curl -6`。下载中心内部会自动选择地址族。
+> 启动时如果 `lib/runtime.sh` 等核心组件缺失，主控台会尝试补齐；若 GitHub、中转站、DNS 或本机证书暂时不可用，下载失败不会再直接退出，也不会删除已有脚本。可以先进入主菜单，再到 `[9] 下载中心` 稍后重试。
 
 ### GitHub 访问困难时
 
@@ -131,12 +132,13 @@ APT 源优化会备份 `/etc/apt/sources.list` 到：
 
 ### 下载问题
 
-纯 IPv6 VPS 不能访问 IPv4-only 下载端点。现在下载中心会：
+纯 IPv6 VPS 不能访问 IPv4-only 下载端点；内网双栈主机也可能因为 DNS、证书、代理或 GitHub 可达性导致初始化下载失败。现在下载中心会：
 
-- 优先使用 `raw.githubusercontent.com`；纯 IPv6 环境自动使用 `curl -6` 或 `wget -6`。
-- 依次尝试官方 raw、GitHub raw path，最后才使用代理 fallback。
-- 在下载 `v0.sh` 到 `v3.sh` 前，同步下载 `lib/runtime.sh` 和 `lib/network_checks.sh`。
-- 任意核心脚本或公共库缺失时，初始化流程会先补齐公共库，再下载子脚本。
+- 纯 IPv6 环境自动使用 `curl -6` 或 `wget -6`，并跳过 IPv4-only 中转。
+- 优先尝试已验证/已缓存的 GitHub 中转和当前地址族可用中转，GitHub 官方 raw / 原始地址作为最后备选。
+- 下载到临时文件并通过 `<SEC_SCRIPT_MARKER_v2.3>` 特征码校验后才替换目标文件；失败时保留已有本地脚本，不再先删文件。
+- 启动初始化只补齐缺失组件；单个组件下载失败会提示原因并跳过失败项，继续进入主菜单，不再因为 `lib/runtime.sh` 一项失败直接退出。
+- 可以在 `[9] 下载中心` 反复重试；下载失败不会破坏已可用的本地脚本。
 
 ### `ICMP(阻断)` 与 `DNS(阻断)` 是什么
 

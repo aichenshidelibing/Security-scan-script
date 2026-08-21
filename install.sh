@@ -103,10 +103,15 @@ download_family_args() {
 }
 
 download_script() {
-    local name="$1" target_family url downloaded=0 base candidate duplicate
+    local name="$1" target_family url downloaded=0 base candidate duplicate tmp status last_error='' invalid_marker=0
     target_family=$(download_family_args)
     mkdir -p "$(dirname -- "$name")" 2>/dev/null || return 1
     echo -ne "${CYAN}${I_DL} fetching ${name}... ${RESET}"
+
+    if ! cmd_exists curl && ! cmd_exists wget; then
+        echo -e "${RED}failed (missing curl/wget; please install one downloader first)${RESET}"
+        return 127
+    fi
 
     # Prefer validated/configured accelerators; official GitHub is last.
     local bases=()
@@ -124,43 +129,55 @@ download_script() {
     done
     bases+=("$GITHUB_BASE" "$GITHUB_RAW_BASE")
 
+    tmp="${name}.tmp.$$.$RANDOM"
     for base in "${bases[@]}"; do
         url="${base}/${name}"
-        rm -f -- "$name"
+        rm -f -- "$tmp"
         if cmd_exists curl; then
             if [ -n "$target_family" ]; then
-                curl "$target_family" -fsSL --connect-timeout 5 --max-time 30 --retry 2 -o "$name" "$url" >/dev/null 2>&1
+                curl "$target_family" -fsSL --connect-timeout 5 --max-time 30 --retry 2 -o "$tmp" "$url" >/dev/null 2>&1
             else
-                curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 -o "$name" "$url" >/dev/null 2>&1
+                curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 -o "$tmp" "$url" >/dev/null 2>&1
             fi
+            status=$?
+            [ "$status" -eq 0 ] || last_error="curl exit $status @ $base"
         elif cmd_exists wget; then
             if [ -n "$target_family" ]; then
-                wget "$target_family" -q -O "$name" --timeout=10 --tries=2 "$url" >/dev/null 2>&1
+                wget "$target_family" -q -O "$tmp" --timeout=10 --tries=2 "$url" >/dev/null 2>&1
             else
-                wget -q -O "$name" --timeout=8 --tries=2 "$url" >/dev/null 2>&1
+                wget -q -O "$tmp" --timeout=8 --tries=2 "$url" >/dev/null 2>&1
             fi
-        else
-            break
+            status=$?
+            [ "$status" -eq 0 ] || last_error="wget exit $status @ $base"
         fi
-        if [ -s "$name" ]; then
+        if [ -s "$tmp" ]; then
             # Reject an HTML error page from a proxy when downloading scripts.
-            if [[ "$name" == *.sh ]] && ! grep -Fq -- "$TAG_MARKER" "$name" 2>/dev/null; then
-                rm -f -- "$name"
+            if [[ "$name" == *.sh ]] && ! grep -Fq -- "$TAG_MARKER" "$tmp" 2>/dev/null; then
+                invalid_marker=$((invalid_marker + 1))
+                last_error="downloaded content failed script marker check @ $base"
+                rm -f -- "$tmp"
                 continue
             fi
+            mv -f -- "$tmp" "$name" || { rm -f -- "$tmp"; echo -e "${RED}failed (cannot replace target file)${RESET}"; return 1; }
             downloaded=1
             break
         fi
     done
 
+    rm -f -- "$tmp"
     if [ "$downloaded" -eq 1 ] && [ -s "$name" ]; then
         sed -i 's/\r$//' "$name" 2>/dev/null
         chmod +x "$name"
         echo -e "${GREEN}success${RESET}"
         return 0
     fi
-    rm -f -- "$name"
-    echo -e "${RED}failed (no IPv4/IPv6-compatible endpoint succeeded)${RESET}"
+    if [ "$invalid_marker" -gt 0 ]; then
+        echo -e "${RED}failed (endpoints returned invalid content; existing local file preserved)${RESET}"
+    elif [ -n "$last_error" ]; then
+        echo -e "${RED}failed (no endpoint succeeded; ${last_error}; existing local file preserved)${RESET}"
+    else
+        echo -e "${RED}failed (no IPv4/IPv6-compatible endpoint succeeded; existing local file preserved)${RESET}"
+    fi
     return 1
 }
 download_runtime_libs() {
@@ -223,9 +240,13 @@ menu_download() {
         read -r dl_choice
         
         case "$dl_choice" in
-            [0-4]) download_runtime_libs && download_script "v${dl_choice}.sh"; sleep 1 ;;
-            a|A) download_runtime_libs; for s in v0.sh v1.sh v2.sh v3.sh v4.sh; do download_script "$s"; done
-                ui_ok "同步完成。"; sleep 1; return ;;
+            [0-4]) download_runtime_libs || ui_fail "公共库下载失败；将继续尝试下载所选脚本，已有本地文件不会被删除。"; download_script "v${dl_choice}.sh"; sleep 1 ;;
+            a|A)
+                local sync_failed=0
+                download_runtime_libs || sync_failed=1
+                for s in v0.sh v1.sh v2.sh v3.sh v4.sh; do download_script "$s" || sync_failed=1; done
+                if [ "$sync_failed" -eq 0 ]; then ui_ok "同步完成。"; else ui_fail "部分组件下载失败；已保留现有本地文件，可稍后重试或检查网络/DNS/证书。"; fi
+                sleep 1; return ;;
             q|Q) return ;;
         esac
     done
@@ -302,20 +323,42 @@ main_menu() {
     done
 }
 
-# --- 前置检查 ---
-[ "$(id -u)" -eq 0 ] || { echo -e "${RED}${I_FAIL} 错误: 请使用 root 权限运行。${RESET}"; exit 1; }
-core_missing=0
-for core in v0.sh v1.sh v2.sh v3.sh v4.sh lib/runtime.sh lib/network_checks.sh lib/github.sh; do
-    [ -f "$core" ] || core_missing=1
-done
-if [ "$core_missing" -eq 1 ]; then
-    show_dashboard
-    echo -e "${YELLOW}${I_WARN} 检测到核心组件缺失，正在进行初始化下载...${RESET}"
-    download_runtime_libs || exit 1
-    for script in v0.sh v1.sh v2.sh v3.sh v4.sh; do
-        download_script "$script" || exit 1
-    done
-    sleep 1
-fi
+# --- 前置检查 / 启动初始化 ---
+bootstrap_missing_components() {
+    local missing=0 failed=0 component
+    local libs=(lib/runtime.sh lib/network_checks.sh lib/github.sh)
+    local scripts=(v0.sh v1.sh v2.sh v3.sh v4.sh)
 
-main_menu
+    for component in "${libs[@]}" "${scripts[@]}"; do
+        [ -f "$component" ] || missing=1
+    done
+    [ "$missing" -eq 1 ] || return 0
+
+    show_dashboard
+    echo -e "${YELLOW}${I_WARN} 检测到组件缺失，将进行一次非阻塞初始化下载...${RESET}"
+    echo -e "${GREY}     如果 GitHub/中转站/DNS/证书暂时不可用，脚本会跳过失败项并继续进入主菜单。${RESET}"
+
+    for component in "${libs[@]}"; do
+        [ -f "$component" ] && continue
+        download_script "$component" || failed=1
+    done
+    for component in "${scripts[@]}"; do
+        [ -f "$component" ] && continue
+        download_script "$component" || failed=1
+    done
+
+    if [ "$failed" -eq 1 ]; then
+        echo -e "${YELLOW}${I_WARN} 初始化下载失败（部分组件不可用），已跳过失败项并继续进入主菜单。${RESET}"
+        echo -e "${GREY}     可稍后进入 [9] 下载中心重试；已有本地文件不会因下载失败被删除。${RESET}"
+    else
+        ui_ok "初始化下载完成。"
+    fi
+    sleep 1
+    return 0
+}
+
+if [ "${SEC_TOOLBOX_NO_MAIN:-0}" != 1 ]; then
+    [ "$(id -u)" -eq 0 ] || { echo -e "${RED}${I_FAIL} 错误: 请使用 root 权限运行。${RESET}"; exit 1; }
+    bootstrap_missing_components
+    main_menu
+fi

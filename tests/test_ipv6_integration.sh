@@ -20,7 +20,7 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 (
   cd "$TEST_TMP" || exit 1
   # Load install.sh function definitions without entering its root-only menu.
-  source <(sed '/^# --- 前置检查 ---/,$d' "$ROOT_DIR/install.sh")
+  SEC_TOOLBOX_NO_MAIN=1 source "$ROOT_DIR/install.sh"
   ip() {
     case "$*" in
       *"-6 addr show"*) printf '2: eth0    inet6 2001:db8::10/64 scope global\n' ;;
