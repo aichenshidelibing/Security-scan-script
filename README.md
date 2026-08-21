@@ -19,21 +19,73 @@
 
 请使用具有 **root** 权限的终端执行。
 
-### 官方源
+### 推荐：多源自动拉取
+
+新机器第一次拉取 `install.sh` 时，脚本内部的下载中心还没有机会运行；因此推荐直接使用下面这段多源自举命令。它会优先尝试多个 GitHub 加速站，最后才回退官方 raw，并且会校验脚本特征码后再执行。
 
 ```bash
-wget -qO install.sh https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
-chmod +x install.sh
-./install.sh
+cat >/tmp/sec-toolbox-fetch.sh <<'EOF'
+#!/usr/bin/env sh
+set -u
+marker='<SEC_SCRIPT_MARKER_v2.3>'
+out='install.sh'
+family=''
+if command -v ip >/dev/null 2>&1; then
+  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 ' && \
+     ! ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
+    family='-6'
+  fi
+fi
+fetch_one() {
+  url="$1"
+  printf '[DL] trying %s\n' "$url"
+  if command -v curl >/dev/null 2>&1; then
+    curl $family -fsSL --connect-timeout 4 --max-time 15 --retry 1 -o "$out.tmp" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget $family -q -O "$out.tmp" --timeout=8 --tries=1 "$url"
+  else
+    printf '[X] curl/wget not found\n' >&2
+    return 127
+  fi
+}
+ok=0
+while IFS= read -r url; do
+  [ -n "$url" ] || continue
+  case "$family:$url" in -6:*v4.gh-proxy.org*) continue ;; esac
+  if fetch_one "$url" && grep -Fq "$marker" "$out.tmp"; then
+    mv -f "$out.tmp" "$out"
+    ok=1
+    break
+  fi
+  rm -f "$out.tmp"
+done <<'EOF_URLS'
+https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://v6.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://cdn.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://axisnow.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://gh-proxy.com/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://v4.gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://ghproxy.net/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://ghfast.top/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+https://github.com/aichenshidelibing/Security-scan-script/raw/refs/heads/main/install.sh
+EOF_URLS
+[ "$ok" = 1 ] || { printf '[X] install.sh download failed; please check DNS/cert/proxy/network\n' >&2; exit 1; }
+chmod +x "$out"
+./"$out"
+EOF
+sh /tmp/sec-toolbox-fetch.sh
 ```
 
-> 纯 IPv6 主机可以把上述 `wget` 改为 `wget -6`；如果使用 curl，请显式使用 `curl -6`。下载中心内部会自动选择地址族。
-> 启动时如果 `lib/runtime.sh` 等核心组件缺失，主控台会尝试补齐；若 GitHub、中转站、DNS 或本机证书暂时不可用，下载失败不会再直接退出，也不会删除已有脚本。可以先进入主菜单，再到 `[9] 下载中心` 稍后重试。
+> 启动后如果 `lib/runtime.sh` 等核心组件缺失，主控台也会用同一套加速源继续补齐；若 GitHub、中转站、DNS 或本机证书暂时不可用，下载失败不会再直接退出，也不会删除已有脚本。可以先进入主菜单，再到 `[9] 下载中心` 稍后重试。
 
-### GitHub 访问困难时
+### 备用：单源命令
+
+如果只想手动指定一个源，也可以使用下面两种方式之一：
 
 ```bash
-wget -qO install.sh https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
+wget -qO install.sh https://gh-proxy.org/https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh || \
+wget -qO install.sh https://raw.githubusercontent.com/aichenshidelibing/Security-scan-script/refs/heads/main/install.sh
 chmod +x install.sh
 ./install.sh
 ```
@@ -135,10 +187,10 @@ APT 源优化会备份 `/etc/apt/sources.list` 到：
 纯 IPv6 VPS 不能访问 IPv4-only 下载端点；内网双栈主机也可能因为 DNS、证书、代理或 GitHub 可达性导致初始化下载失败。现在下载中心会：
 
 - 纯 IPv6 环境自动使用 `curl -6` 或 `wget -6`，并跳过 IPv4-only 中转。
-- 优先尝试已验证/已缓存的 GitHub 中转和当前地址族可用中转，GitHub 官方 raw / 原始地址作为最后备选。
+- 优先尝试已验证/已缓存的 GitHub 中转和当前地址族可用中转，GitHub 官方 raw / 原始地址作为最后备选；下载时会显示 `trying xxx`，方便判断当前正在试哪个源。
 - 下载到临时文件并通过 `<SEC_SCRIPT_MARKER_v2.3>` 特征码校验后才替换目标文件；失败时保留已有本地脚本，不再先删文件。
 - 启动初始化只补齐缺失组件；单个组件下载失败会提示原因并跳过失败项，继续进入主菜单，不再因为 `lib/runtime.sh` 一项失败直接退出。
-- 可以在 `[9] 下载中心` 反复重试；下载失败不会破坏已可用的本地脚本。
+- 单个源会使用较短超时并快速切换到下一个源；可以在 `[9] 下载中心` 反复重试，下载失败不会破坏已可用的本地脚本。
 
 ### `ICMP(阻断)` 与 `DNS(阻断)` 是什么
 

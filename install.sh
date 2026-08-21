@@ -91,22 +91,58 @@ github_cached_fallback_base() {
         esac
     done <"$file"
 }
-download_family_args() {
-    local mode=""
+download_ip_mode() {
     if command -v ip >/dev/null 2>&1; then
         if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 ' &&
            ! ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
-            mode=ipv6
+            printf '%s\n' 'pure_ipv6'
+            return 0
+        fi
+        if ip -4 addr show scope global 2>/dev/null | grep -q 'inet ' &&
+           ! ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '; then
+            printf '%s\n' 'ipv4_only'
+            return 0
         fi
     fi
-    [ "$mode" = ipv6 ] && printf '%s\n' '-6'
+    printf '%s\n' 'dual_stack'
+}
+
+download_family_args() {
+    [ "$(download_ip_mode)" = pure_ipv6 ] && printf '%s\n' '-6'
+}
+
+download_base_supported() {
+    local base="$1" mode
+    mode=$(download_ip_mode)
+    case "$base" in
+        *v4.gh-proxy.org*) [ "$mode" != pure_ipv6 ] ;;
+        *v6.gh-proxy.org*) [ "$mode" != ipv4_only ] ;;
+        *) return 0 ;;
+    esac
+}
+
+download_base_label() {
+    local base="$1"
+    case "$base" in
+        *v6.gh-proxy.org*) printf '%s\n' 'v6.gh-proxy.org' ;;
+        *cdn.gh-proxy.org*) printf '%s\n' 'cdn.gh-proxy.org' ;;
+        *axisnow.gh-proxy.org*) printf '%s\n' 'axisnow.gh-proxy.org' ;;
+        *v4.gh-proxy.org*) printf '%s\n' 'v4.gh-proxy.org' ;;
+        *gh-proxy.org/https://raw.githubusercontent.com*) printf '%s\n' 'gh-proxy.org' ;;
+        *gh-proxy.com*) printf '%s\n' 'gh-proxy.com' ;;
+        *ghproxy.net*) printf '%s\n' 'ghproxy.net' ;;
+        *ghfast.top*) printf '%s\n' 'ghfast.top' ;;
+        *raw.githubusercontent.com*) printf '%s\n' 'GitHub official raw' ;;
+        *github.com/*/raw/*) printf '%s\n' 'GitHub raw path' ;;
+        *) printf '%s\n' "$base" ;;
+    esac
 }
 
 download_script() {
     local name="$1" target_family url downloaded=0 base candidate duplicate tmp status last_error='' invalid_marker=0
     target_family=$(download_family_args)
     mkdir -p "$(dirname -- "$name")" 2>/dev/null || return 1
-    echo -ne "${CYAN}${I_DL} fetching ${name}... ${RESET}"
+    echo -e "${CYAN}${I_DL} fetching ${name}... ${RESET}"
 
     if ! cmd_exists curl && ! cmd_exists wget; then
         echo -e "${RED}failed (missing curl/wget; please install one downloader first)${RESET}"
@@ -131,21 +167,23 @@ download_script() {
 
     tmp="${name}.tmp.$$.$RANDOM"
     for base in "${bases[@]}"; do
+        download_base_supported "$base" || continue
+        echo -e "${GREY}     trying $(download_base_label "$base")...${RESET}"
         url="${base}/${name}"
         rm -f -- "$tmp"
         if cmd_exists curl; then
             if [ -n "$target_family" ]; then
-                curl "$target_family" -fsSL --connect-timeout 5 --max-time 30 --retry 2 -o "$tmp" "$url" >/dev/null 2>&1
+                curl "$target_family" -fsSL --connect-timeout "${SEC_DOWNLOAD_CONNECT_TIMEOUT:-4}" --max-time "${SEC_DOWNLOAD_MAX_TIME:-12}" --retry "${SEC_DOWNLOAD_RETRY:-1}" -o "$tmp" "$url" >/dev/null 2>&1
             else
-                curl -fsSL --connect-timeout 5 --max-time 20 --retry 2 -o "$tmp" "$url" >/dev/null 2>&1
+                curl -fsSL --connect-timeout "${SEC_DOWNLOAD_CONNECT_TIMEOUT:-4}" --max-time "${SEC_DOWNLOAD_MAX_TIME:-12}" --retry "${SEC_DOWNLOAD_RETRY:-1}" -o "$tmp" "$url" >/dev/null 2>&1
             fi
             status=$?
             [ "$status" -eq 0 ] || last_error="curl exit $status @ $base"
         elif cmd_exists wget; then
             if [ -n "$target_family" ]; then
-                wget "$target_family" -q -O "$tmp" --timeout=10 --tries=2 "$url" >/dev/null 2>&1
+                wget "$target_family" -q -O "$tmp" --timeout="${SEC_DOWNLOAD_WGET_TIMEOUT:-8}" --tries="${SEC_DOWNLOAD_WGET_TRIES:-1}" "$url" >/dev/null 2>&1
             else
-                wget -q -O "$tmp" --timeout=8 --tries=2 "$url" >/dev/null 2>&1
+                wget -q -O "$tmp" --timeout="${SEC_DOWNLOAD_WGET_TIMEOUT:-8}" --tries="${SEC_DOWNLOAD_WGET_TRIES:-1}" "$url" >/dev/null 2>&1
             fi
             status=$?
             [ "$status" -eq 0 ] || last_error="wget exit $status @ $base"
