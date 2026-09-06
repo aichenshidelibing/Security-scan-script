@@ -294,7 +294,108 @@ fi
 CUR_P=${CUR_P:-22}
 
 has_sshd_config() { [ -f "$SSHD_CONFIG" ]; }
-bbr_available() { modprobe tcp_bbr >/dev/null 2>&1 || sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; }
+
+# --- BBR 多版本能力探测 ---
+# BBR v1: 4.9+ (tcp_bbr)        - 稳定
+# BBR v2: 5.4+ (bbr2)            - 拥塞控制改进（需内核已加载 bbr2）
+# BBR v3: 6.5+ (bbr3)            - 最新，需较新内核
+detect_kernel_ver() {
+    local raw rel
+    raw=$(uname -r 2>/dev/null)
+    [ -z "$raw" ] && { echo "0.0"; return; }
+    rel="${raw%%-*}"
+    if [[ "$rel" =~ ^([0-9]+)\.([0-9]+) ]]; then echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"; else echo "0.0"; fi
+}
+
+kernel_ge() { awk -v k="$1" -v cur="$2" 'BEGIN{ exit !(cur+0 >= k+0) }'; }
+
+bbr_available_algos() {
+    sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null \
+        | awk -F'[:=]' 'NF>1 {gsub(/ /,"",$2); print $2; exit}'
+}
+
+# 返回当前内核 + 已加载算法下可用的 BBR 变体名（空格分隔）
+available_bbr_variants() {
+    local ver="$1" algos out=""
+    algos=$(bbr_available_algos)
+    [ -z "$algos" ] && return 0
+    if kernel_ge 4.9 "$ver" && [[ " $algos " == *" bbr "* ]]; then out="bbr"; fi
+    if kernel_ge 5.4 "$ver" && [[ " $algos " == *" bbr2 "* ]]; then out="${out:+$out }bbr2"; fi
+    if kernel_ge 6.5 "$ver" && [[ " $algos " == *" bbr3 "* ]]; then out="${out:+$out }bbr3"; fi
+    [ -n "$out" ] && echo "$out"
+    return 0
+}
+
+# 旧的单变体探测，保留供默认菜单条目使用
+bbr_available() {
+    local ver; ver=$(detect_kernel_ver)
+    kernel_ge 4.9 "$ver" && [[ " $(bbr_available_algos) " == *" bbr "* ]]
+}
+
+SEC_BBR_VARIANT=""
+
+init_bbr_variants() {
+    local ver avails last
+    ver=$(detect_kernel_ver)
+    avails=$(available_bbr_variants "$ver")
+    if [ -z "$avails" ]; then
+        ui_warn "当前内核 ${ver} 不支持 BBR (需 4.9+ 且 tcp_bbr 已加载)。"
+        return 1
+    fi
+    for v in $avails; do last="$v"; done
+    SEC_BBR_VARIANT="$last"
+    echo -e "${CYAN}${I_INFO} BBR 可用变体: ${GREEN}$avails${RESET} ${GREY}(内核 ${ver}; 默认 $last，菜单中可改)${RESET}"
+    return 0
+}
+
+enable_bbr() {
+    local variant="${1:-$SEC_BBR_VARIANT}" algos
+    algos=$(bbr_available_algos)
+    [[ " $algos " != *" $variant "* ]] && { ui_fail "算法 $variant 不可用（仅支持: $algos）。"; return 1; }
+    sed -i '/^net.core.default_qdisc=/d;/^net.ipv4.tcp_congestion_control=/d' /etc/sysctl.conf
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=$variant" >> /etc/sysctl.conf
+    if sysctl -p >/dev/null 2>&1; then ui_ok "BBR ($variant) 已开启。"; return 0; fi
+    ui_fail "sysctl 应用失败。"
+    return 1
+}
+
+menu_bbr_pick() {
+    local ver="$1" avails picked
+    avails=$(available_bbr_variants "$ver")
+    [ -z "$avails" ] && { ui_fail "当前内核不支持任何 BBR 变体。"; return 1; }
+    while true; do
+        clear
+        echo -e "${BOLD}BBR 算法选择${RESET}"
+        echo -e "${GREY}内核: $ver   可用: $avails${RESET}"
+        ui_line
+        local i=1
+        for v in $avails; do
+            case "$v" in
+                bbr)  echo " [$i] BBR v1 (稳定 / Linux 4.9+)" ;;
+                bbr2) echo " [$i] BBR v2 (改进 / Linux 5.4+)" ;;
+                bbr3) echo " [$i] BBR v3 (最新 / Linux 6.5+)" ;;
+                *)    echo " [$i] $v" ;;
+            esac
+            i=$((i+1))
+        done
+        echo " [q] 返回"
+        ui_line
+        echo -ne "请选择 BBR 变体: "
+        read -r bbr_choice
+        case "$bbr_choice" in
+            q|Q) return 1 ;;
+            *)
+                picked=$(echo "$avails" | awk -v n="$bbr_choice" 'NR==n{print; exit}')
+                if [ -n "$picked" ]; then
+                    SEC_BBR_VARIANT="$picked"
+                    enable_bbr "$picked"
+                    return $?
+                fi
+                echo -e "${YELLOW}无效选择${RESET}"; sleep 1 ;;
+        esac
+    done
+}
 
 add_item() {
     COUNT=$((COUNT+1))
@@ -358,11 +459,8 @@ apply_fix() {
         "自动优化 APT 软件源") apply_apt_mirror_auto ;;
         "开启 TCP BBR 加速")
             if bbr_available; then
-                sed -i '/^net.core.default_qdisc=/d;/^net.ipv4.tcp_congestion_control=/d' /etc/sysctl.conf
-                echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-                echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-                sysctl -p >/dev/null 2>&1
-                ui_ok "BBR 已开启。"
+                if [ -z "$SEC_BBR_VARIANT" ]; then init_bbr_variants >/dev/null 2>&1; fi
+                enable_bbr "$SEC_BBR_VARIANT" || menu_bbr_pick "$(detect_kernel_ver)"
             else
                 ui_fail "当前内核未提供 tcp_bbr，已跳过。"
             fi ;;
@@ -402,6 +500,7 @@ EOF
 # --- 核心逻辑调整 ---
 init_network_insight
 init_audit
+init_bbr_variants || true
 
 while true; do
     clear

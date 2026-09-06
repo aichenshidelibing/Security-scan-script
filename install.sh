@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# install.sh - Linux 安全工具箱主控台 (v3.2 稳定增强版)
-# 特性：安全下载校验 | 本地自检 | 系统仪表盘 | 细化下载中心 | 极致兼容
+# SEC_TOOLBOX_VERSION=4.0.0
+# install.sh - Linux 安全工具箱主控台 (v4.0 增强版)
+# 特性：版本自检 | 本地模式 | BBR 多版本 | v5 出口加速中心 | 统一 emoji
 
 export LC_ALL=C
 
 # --- [手动修正位] 如果标题或状态依然显示方块乱码，请将 0 改为 1 ---
 FORCE_TEXT_MODE=0
 
+# --- 启动参数解析 ---
+# 支持: --local / -l / --bendi  启用本地模式（不发起任何网络请求）
+SEC_LOCAL_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --local|-l|--bendi) SEC_LOCAL_MODE=1 ;;
+        *) ;;
+    esac
+done
+export SEC_LOCAL_MODE
+
 # --- 配置 ---
 GITHUB_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
-TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>" # 唯一特征识别码
+GITHUB_RAW_BASE="https://github.com/aichenshidelibing/Security-scan-script/raw/refs/heads/main"
+TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>"
+SEC_TOOLBOX_VERSION="${SEC_TOOLBOX_VERSION:-4.0.0}"
+SEC_TOOLBOX_VERSION_URL="${SEC_TOOLBOX_VERSION_URL:-$GITHUB_BASE/install.sh}"
+SEC_UPDATE_CHECK="${SEC_UPDATE_CHECK:-1}"
 
 # --- [核心] 智能环境检测与配色 ---
 detect_env() {
@@ -27,8 +43,9 @@ detect_env() {
 
     # 3. 图标定义
     if [ "$USE_EMOJI" == "1" ]; then
-        I_MAIN="🛡️ "; I_OK="✅"; I_WARN="⚠️ "; I_FAIL="❌"; I_INFO="ℹ️ "
-        I_DL="⬇️ "; I_SET="⚙️ "; I_SYS="🖥️ "; I_EXIT="🚪"; I_CHECK="🧪"
+        # 单一图标集，兼容 SSH 和 VNC 客户端
+        I_MAIN="▶"; I_OK="✓"; I_WARN="!"; I_FAIL="✗"; I_INFO="»"
+        I_DL="↓"; I_SET="⚙"; I_SYS="●"; I_EXIT="×"; I_CHECK="?"
     else
         I_MAIN="[*]"; I_OK="[OK]"; I_WARN="[!]"; I_FAIL="[X]"; I_INFO="[i]"
         I_DL="[DL]"; I_SET="[ST]"; I_SYS="[SYS]"; I_EXIT="[Q]"; I_CHECK="[CK]"
@@ -52,7 +69,7 @@ show_dashboard() {
     local user_now=$(whoami)
 
     ui_header
-    echo -e "${BOLD}${CYAN}           ${I_MAIN} Linux Security Toolbox v3.2 (稳定增强版) ${RESET}"
+    echo -e "${BOLD}${CYAN}           ${I_MAIN} Linux Security Toolbox v${SEC_TOOLBOX_VERSION}${mode_tag} ${RESET}"
     ui_header
     printf "  ${I_SYS} 系统: ${WHITE}%-30s ${GREY} IP: ${WHITE}%-15s${RESET}\n" "${os_info:0:30}" "$ip_addr"
     printf "  ${GREY}⏰ 时间: ${WHITE}%-30s ${GREY} 用户: ${WHITE}%-15s${RESET}\n" "$time_now" "$user_now"
@@ -63,7 +80,16 @@ show_dashboard() {
 download_script() {
     local name="$1"
     local url="${GITHUB_BASE}/${name}"
-    
+
+    if [ "$SEC_LOCAL_MODE" = 1 ]; then
+        if [ -f "$name" ]; then
+            echo -e "${GREY}[本地] 已就绪 $name${RESET}"
+            return 0
+        fi
+        echo -e "${RED}失败 (本地模式且 $name 不存在)${RESET}"
+        return 1
+    fi
+
     echo -ne "${CYAN}${I_DL} 正在获取 ${name}... ${RESET}"
     if cmd_exists wget; then
         wget -q -O "$name" "$url"
@@ -85,9 +111,36 @@ download_script() {
     fi
 }
 
+# --- 启动预检查：检查远端是否有更新版本（可跳过） ---
+check_update() {
+    [ "$SEC_LOCAL_MODE" = 1 ] && return 0
+    [ "$SEC_UPDATE_CHECK" != 1 ] && return 0
+    local remote_ver="" tmp
+    tmp=$(mktemp 2>/dev/null) || tmp="/tmp/sec_toolbox_check_$$"
+    if cmd_exists curl; then
+        curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp" "$SEC_TOOLBOX_VERSION_URL" >/dev/null 2>&1
+    elif cmd_exists wget; then
+        wget -q -O "$tmp" --timeout=5 --tries=1 "$SEC_TOOLBOX_VERSION_URL" >/dev/null 2>&1
+    fi
+    if [ -s "$tmp" ]; then
+        remote_ver=$(grep -E '^# SEC_TOOLBOX_VERSION=' "$tmp" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]')
+    fi
+    rm -f -- "$tmp" 2>/dev/null
+    [ -z "$remote_ver" ] && return 0
+    [ "$remote_ver" = "$SEC_TOOLBOX_VERSION" ] && return 0
+    echo -e "${YELLOW}${I_WARN} 远端版本: $remote_ver (本地: $SEC_TOOLBOX_VERSION)${RESET}"
+    echo -ne "${CYAN}是否进入 [9] 下载中心更新? (y/N/s=永久跳过本次会话): ${RESET}"
+    read -r upd
+    case "$upd" in
+        y|Y|yes|YES) menu_download; return 0 ;;
+        s|S|skip)   SEC_UPDATE_CHECK=0; return 0 ;;
+        *)          return 0 ;;
+    esac
+}
+
 # --- 本地自检：语法与基础完整性 ---
 self_check() {
-    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh"
+    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh v4.sh v5.sh"
     local failed=0
 
     echo ""
@@ -131,15 +184,19 @@ menu_download() {
         echo " [2] 下载 v2.sh (SSH密钥配置)"
         echo " [3] 下载 v3.sh (网络隐身/禁Ping)"
         ui_line
+        echo " [4] 拉取 v4.sh (IPv6 出口/WARP/GitHub加速 - 主动拉取)"
+        echo " [5] 拉取 v5.sh (WARP + GitHub加速源自动配置 - 主动拉取)"
         echo " [a] 一键更新所有脚本 (All)"
         echo " [q] 返回主菜单"
         ui_line
         echo -ne "${CYAN}请输入选择: ${RESET}"
         read -r dl_choice
-        
+
         case "$dl_choice" in
             [0-3]) download_script "v${dl_choice}.sh"; sleep 1 ;;
-            a|A) for s in v0.sh v1.sh v2.sh v3.sh; do download_script "$s"; done
+            4) download_script "v4.sh"; sleep 1 ;;
+            5) download_script "v5.sh"; sleep 1 ;;
+            a|A) for s in v0.sh v1.sh v2.sh v3.sh v4.sh v5.sh; do download_script "$s"; done
                 ui_ok "同步完成。"; sleep 1; return ;;
             q|Q) return ;;
         esac
@@ -193,6 +250,8 @@ main_menu() {
         echo -e "     ${GREY}└─ 密钥部署 / 改端口 / 密码登录 / Root登录策略 / 回滚${RESET}"
         printf " [3] %-30s [状态: %s]\n" "网络隐身 (v3.sh)" "$(st v3.sh)"
         echo -e "     ${GREY}└─ 开启或关闭禁 Ping / 隐藏服务器存活状态${RESET}"
+        [ -f "v4.sh" ] && { printf " [4] %-30s [状态: %s]\n" "IPv6出口中心 (v4.sh)" "$(st v4.sh)"; echo -e "     ${GREY}└─ WARP IPv4 出口 / GitHub IPv6 加速 fallback${RESET}"; }
+        [ -f "v5.sh" ] && { printf " [5] %-30s [状态: %s]\n" "出口与加速源 (v5.sh)" "$(st v5.sh)"; echo -e "     ${GREY}└─ WARP 安装 / GitHub 镜像源自动配置${RESET}"; }
         ui_line
         echo " [7] 本地自检 (检查脚本语法)"
         echo " [8] 智能清理 (清理所有工具脚本)"
@@ -203,7 +262,7 @@ main_menu() {
         read -r CHOICE
 
         case "$CHOICE" in
-            [0-3])
+            [0-5])
                 local S="v${CHOICE}.sh"
                 if [ -f "$S" ]; then bash ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;
@@ -217,7 +276,16 @@ main_menu() {
 
 # --- 前置检查 ---
 [ "$(id -u)" -eq 0 ] || { echo -e "${RED}${I_FAIL} 错误: 请使用 root 权限运行。${RESET}"; exit 1; }
-if [ ! -x "v0.sh" ] && [ ! -x "v1.sh" ]; then
+
+# 启动预检查：检测远端版本
+[ "$SEC_LOCAL_MODE" = 1 ] || check_update
+
+# v0/v1 默认需要；v2/v3/v4/v5 仅在已存在时加载（v4/v5 默认不主动拉取）
+NEED_INIT=0
+[ ! -x "v0.sh" ] && NEED_INIT=1
+[ ! -x "v1.sh" ] && NEED_INIT=1
+
+if [ "$NEED_INIT" = 1 ] && [ "$SEC_LOCAL_MODE" != 1 ]; then
     show_dashboard
     echo -e "${YELLOW}${I_WARN} 检测到核心组件缺失，正在进行初始化下载...${RESET}"
     download_script "v0.sh"
