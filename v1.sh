@@ -112,7 +112,26 @@ handle_lock() {
     for lock in "${locks[@]}"; do if lock_busy "$lock"; then locked="$lock"; break; fi; done
     [ -z "$locked" ] && return 0
     ui_warn "检测到包管理器锁: $locked"
-    command -v fuser >/dev/null 2>&1 || ui_warn "缺少 fuser(psmisc)，无法识别锁持有进程，将仅等待锁文件状态。"
+    if ! command -v fuser >/dev/null 2>&1; then
+        ui_warn "缺少 fuser(psmisc)，尝试自动安装..."
+        if command -v apt-get >/dev/null 2>&1; then
+            if apt-get install -y psmisc >/dev/null 2>&1; then
+                ui_ok "psmisc 已安装。"
+            else
+                ui_warn "psmisc 安装失败（可能源未就绪或网络受限），已跳过等待；如仍失败请手动检查 apt/dpkg 进程。"
+                command -v dpkg >/dev/null 2>&1 && dpkg --configure -a >/dev/null 2>&1
+                return 0
+            fi
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y psmisc >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y psmisc >/dev/null 2>&1 || true
+        fi
+    fi
+    # 重新探测锁持有状态（若 psmisc 安装失败，fuser 仍不存在 → 假定未持有）
+    locked=""
+    for lock in "${locks[@]}"; do if lock_busy "$lock"; then locked="$lock"; break; fi; done
+    [ -z "$locked" ] && { command -v dpkg >/dev/null 2>&1 && dpkg --configure -a >/dev/null 2>&1; return 0; }
     local count=0
     while lock_busy "$locked" && [ "$count" -lt 30 ]; do sleep 1; count=$((count+1)); done
     if lock_busy "$locked"; then ui_fail "包管理器仍被占用，请稍后重试或手动检查 apt/dpkg 进程。"; return 1; fi
