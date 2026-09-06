@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# v5.sh - WARP 安装 + GitHub 加速源自动配置 (v1.0)
+# v4.sh - WARP 安装 + GitHub 加速源自动配置 (v1.0)
 
 export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive

@@ -2,7 +2,7 @@
 # <SEC_SCRIPT_MARKER_v2.3>
 # SEC_TOOLBOX_VERSION=4.0.0
 # install.sh - Linux 安全工具箱主控台 (v4.0 增强版)
-# 特性：版本自检 | 本地模式 | BBR 多版本 | v5 出口加速中心 | 统一 emoji
+# 特性：版本自检 | 本地模式 | BBR 多版本 | v4 出口加速中心 | 统一 emoji
 
 export LC_ALL=C
 
@@ -140,7 +140,7 @@ check_update() {
 
 # --- 本地自检：语法与基础完整性 ---
 self_check() {
-    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh v4.sh v5.sh"
+    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh v4.sh"
     local failed=0
 
     echo ""
@@ -184,8 +184,7 @@ menu_download() {
         echo " [2] 下载 v2.sh (SSH密钥配置)"
         echo " [3] 下载 v3.sh (网络隐身/禁Ping)"
         ui_line
-        echo " [4] 拉取 v4.sh (IPv6 出口/WARP/GitHub加速 - 主动拉取)"
-        echo " [5] 拉取 v5.sh (WARP + GitHub加速源自动配置 - 主动拉取)"
+        echo " [4] 拉取 v4.sh (WARP + GitHub加速源自动配置 - 按需)"
         echo " [a] 一键更新所有脚本 (All)"
         echo " [q] 返回主菜单"
         ui_line
@@ -195,8 +194,7 @@ menu_download() {
         case "$dl_choice" in
             [0-3]) download_script "v${dl_choice}.sh"; sleep 1 ;;
             4) download_script "v4.sh"; sleep 1 ;;
-            5) download_script "v5.sh"; sleep 1 ;;
-            a|A) for s in v0.sh v1.sh v2.sh v3.sh v4.sh v5.sh; do download_script "$s"; done
+            a|A) for s in v0.sh v1.sh v2.sh v3.sh v4.sh; do download_script "$s"; done
                 ui_ok "同步完成。"; sleep 1; return ;;
             q|Q) return ;;
         esac
@@ -250,8 +248,7 @@ main_menu() {
         echo -e "     ${GREY}└─ 密钥部署 / 改端口 / 密码登录 / Root登录策略 / 回滚${RESET}"
         printf " [3] %-30s [状态: %s]\n" "网络隐身 (v3.sh)" "$(st v3.sh)"
         echo -e "     ${GREY}└─ 开启或关闭禁 Ping / 隐藏服务器存活状态${RESET}"
-        [ -f "v4.sh" ] && { printf " [4] %-30s [状态: %s]\n" "IPv6出口中心 (v4.sh)" "$(st v4.sh)"; echo -e "     ${GREY}└─ WARP IPv4 出口 / GitHub IPv6 加速 fallback${RESET}"; }
-        [ -f "v5.sh" ] && { printf " [5] %-30s [状态: %s]\n" "出口与加速源 (v5.sh)" "$(st v5.sh)"; echo -e "     ${GREY}└─ WARP 安装 / GitHub 镜像源自动配置${RESET}"; }
+        [ -f "v4.sh" ] && { printf " [4] %-30s [状态: %s]\n" "出口与加速源 (v4.sh)" "$(st v4.sh)"; echo -e "     ${GREY}└─ WARP 安装 / GitHub 镜像源自动配置${RESET}"; }
         ui_line
         echo " [7] 本地自检 (检查脚本语法)"
         echo " [8] 智能清理 (清理所有工具脚本)"
@@ -262,7 +259,7 @@ main_menu() {
         read -r CHOICE
 
         case "$CHOICE" in
-            [0-5])
+            [0-4])
                 local S="v${CHOICE}.sh"
                 if [ -f "$S" ]; then bash ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;
@@ -280,16 +277,18 @@ main_menu() {
 # 启动预检查：检测远端版本
 [ "$SEC_LOCAL_MODE" = 1 ] || check_update
 
-# v0/v1 默认需要；v2/v3/v4/v5 仅在已存在时加载（v4/v5 默认不主动拉取）
+# v0/v1/v2 默认自动下载；v3 按需；v4 按需（主菜单不出现）
 NEED_INIT=0
-[ ! -x "v0.sh" ] && NEED_INIT=1
-[ ! -x "v1.sh" ] && NEED_INIT=1
+for core in v0.sh v1.sh v2.sh; do
+    [ ! -x "$core" ] && NEED_INIT=1
+done
 
 if [ "$NEED_INIT" = 1 ] && [ "$SEC_LOCAL_MODE" != 1 ]; then
     show_dashboard
     echo -e "${YELLOW}${I_WARN} 检测到核心组件缺失，正在进行初始化下载...${RESET}"
     download_script "v0.sh"
     download_script "v1.sh"
+    download_script "v2.sh"
     sleep 1
 fi
 
