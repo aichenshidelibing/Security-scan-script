@@ -32,6 +32,8 @@ KEY_DIR="/root"
 KEY_PATH="${KEY_DIR}/id_ed25519"
 AUTH_KEYS="/root/.ssh/authorized_keys"
 SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_DROPIN_DIR="/etc/ssh/sshd_config.d"
+SSHD_DROPIN_FILE="${SSHD_DROPIN_DIR}/99-sec-toolbox.conf"
 BACKUP_ROOT="/root/sec_toolbox_backup"
 MANAGED_BEGIN="# BEGIN SEC_TOOLBOX_SSH_POLICY"
 MANAGED_END="# END SEC_TOOLBOX_SSH_POLICY"
@@ -135,36 +137,86 @@ reload_ssh_safe() {
     local service
     sshd_test || return 1
     service=$(detect_ssh_service)
+    # 先尝试 reload; reload 失败时主动尝试 restart 以让 drop-in 立即生效
     if cmd_exists systemctl; then
         if systemctl reload "$service" >/dev/null 2>&1; then
             ui_ok "SSH 服务已重载 ($service)。"
             return 0
         fi
-        ui_warn "reload 失败，可选择 restart；restart 风险更高，可能断开当前连接。"
-        echo -ne "${YELLOW}确认重启 SSH 服务？(输入 RESTART): ${RESET}"
-        read -r c
-        if [ "$c" = "RESTART" ]; then
-            systemctl restart "$service" >/dev/null 2>&1 && { ui_ok "SSH 服务已重启。"; return 0; }
+        if systemctl restart "$service" >/dev/null 2>&1; then
+            ui_ok "SSH 服务已重启 ($service)，新策略已生效。"
+            return 0
         fi
+        ui_fail "SSH 服务 reload 与 restart 均失败，请手动执行 systemctl status ssh/sshd 排查。"
+        return 1
     fi
-    ui_fail "SSH 服务未重载，请手动执行 systemctl reload ssh/sshd。"
+    # 兼容无 systemctl 的系统
+    if cmd_exists service; then
+        service "$service" reload >/dev/null 2>&1 || service "$service" restart >/dev/null 2>&1
+        ui_ok "SSH 服务已尝试 reload/restart。"
+        return 0
+    fi
     return 1
 }
 
+ensure_dropin_persists() {
+    # 防止包管理器/升级脚本清空 drop-in 目录
+    [ -d "$SSHD_DROPIN_DIR" ] || mkdir -p "$SSHD_DROPIN_DIR" 2>/dev/null
+    if [ ! -f "$SSHD_DROPIN_FILE" ]; then
+        ui_warn "检测到 drop-in 文件丢失，恢复中..."
+        # 从最近的备份中恢复 sshd_config 并重新构建 drop-in
+        local latest
+        latest=$(find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'ssh_*' 2>/dev/null | sort | tail -n 1)
+        if [ -n "$latest" ] && [ -f "$latest/manifest.txt" ]; then
+            restore_ssh_backup "$latest" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 remove_managed_block() {
-    sed -i "/^${MANAGED_BEGIN}$/,/^${MANAGED_END}$/d" "$SSHD_CONFIG"
+    sed -i "/^${MANAGED_BEGIN}$/,/^${MANAGED_END}$/d" "$SSHD_CONFIG" 2>/dev/null
+    rm -f "$SSHD_DROPIN_FILE" 2>/dev/null
 }
 
 append_managed_block() {
     local backup_dir="$1"
     shift
     remove_managed_block
+
+    # 写入 /etc/ssh/sshd_config.d/99-sec-toolbox.conf (drop-in)
+    # 优先级最高，覆盖主配置；sshd 默认 Include 路径下不会被覆盖
+    mkdir -p "$SSHD_DROPIN_DIR" 2>/dev/null || {
+        ui_warn "无法创建 $SSHD_DROPIN_DIR，回退写入主配置。"
+        {
+            echo ""
+            echo "$MANAGED_BEGIN"
+            for kv in "$@"; do echo "$kv"; done
+            echo "$MANAGED_END"
+        } >> "$SSHD_CONFIG"
+        sshd_test || { auto_rollback_on_failure "$backup_dir"; return 1; }
+        return 0
+    }
+
     {
-        echo ""
         echo "$MANAGED_BEGIN"
         for kv in "$@"; do echo "$kv"; done
         echo "$MANAGED_END"
-    } >> "$SSHD_CONFIG"
+    } > "$SSHD_DROPIN_FILE"
+    chmod 0644 "$SSHD_DROPIN_FILE"
+
+    # 确保主配置 Include 了 drop-in 目录 (sshd 默认 Include)
+    if [ -f "$SSHD_CONFIG" ] && ! grep -Eq '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' "$SSHD_CONFIG"; then
+        # 如果主配置完全没有 Include 行，则在文件首部注入一次 (兼容最小化镜像)
+        local tmpconf
+        tmpconf=$(mktemp /tmp/sec_toolbox_sshd.XXXXXX)
+        {
+            echo "Include /etc/ssh/sshd_config.d/*.conf"
+            cat "$SSHD_CONFIG"
+        } > "$tmpconf"
+        cat "$tmpconf" > "$SSHD_CONFIG"
+        rm -f "$tmpconf"
+    fi
+
     if ! sshd_test; then
         auto_rollback_on_failure "$backup_dir"
         return 1
@@ -373,6 +425,7 @@ key_setup_flow() {
 main_menu() {
     while true; do
         clear
+        ensure_dropin_persists
         show_status
         echo -e "${BOLD}SSH 登录策略中心${RESET}"
         echo " [1] 生成/部署 ED25519 密钥"
