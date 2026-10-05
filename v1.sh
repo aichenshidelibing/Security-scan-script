@@ -552,7 +552,15 @@ while true; do
             check_space || continue
             heal_environment || { MSG="环境准备失败，请稍后重试。"; continue; }
             for ((i=1; i<=COUNT; i++)); do [ "${SELECTED[$i]}" == "TRUE" ] && apply_fix "$i"; done
-            /usr/sbin/sshd -t >/dev/null 2>&1 && { systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; ui_ok "SSH 已重载。"; }
+            if [ -x /usr/sbin/sshd ] && /usr/sbin/sshd -t >/dev/null 2>&1; then
+                if systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1; then
+                    ui_ok "SSH 已重载。"
+                else
+                    ui_warn "SSH 配置校验通过，但服务重载失败，请手动检查。"
+                fi
+            else
+                ui_warn "SSH 配置校验失败或未找到 sshd，未执行重载。"
+            fi
             
             # [关键修复] 修复完成后解除 trap，使用显式暂停逻辑，用户按键后退出
             trap - EXIT

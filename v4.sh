@@ -111,9 +111,20 @@ detect_warp() {
 
 warp_install_official() {
     ui_info "添加 Cloudflare 官方 APT 源..."
+    command -v apt-get >/dev/null 2>&1 || { ui_fail "未找到 apt-get。"; return 1; }
     local keyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
-    if ! curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg -o "$keyring" 2>/dev/null; then
-        ui_warn "无法下载 GPG 密钥，将跳过签名验证继续尝试..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 5 --max-time 30 -o "$keyring" https://pkg.cloudflareclient.com/pubkey.gpg 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=10 --tries=1 -O "$keyring" https://pkg.cloudflareclient.com/pubkey.gpg 2>/dev/null
+    else
+        ui_fail "需要 curl 或 wget 下载 Cloudflare 签名密钥。"
+        return 1
+    fi
+    if [ ! -s "$keyring" ]; then
+        ui_fail "无法下载 Cloudflare GPG 密钥，已停止安装。"
+        rm -f "$keyring"
+        return 1
     fi
     . /etc/os-release
     local distro=""
