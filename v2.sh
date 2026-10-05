@@ -54,21 +54,59 @@ need_sshd_config() {
     fi
 }
 
+sshd_effective_config() {
+    local bin
+    bin=$(sshd_bin) || return 1
+    # -T 展开 Include 和发行版默认值，优先用于状态显示；旧版 sshd
+    # 不支持 -T 时由调用方回退到文本解析。
+    "$bin" -T -f "$SSHD_CONFIG" 2>/dev/null
+}
+
 get_sshd_value() {
-    local key="$1"
-    # sshd 使用“首次出现生效”，不能只读取主配置的最后一行。
-    # 本工具的 drop-in 会被注入到主配置最前面，因此优先读取它，再读取主配置。
+    local key="$1" value
+    value=$(sshd_effective_config | awk -v k="$key" 'tolower($1) == tolower(k) { print $2; exit }')
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    # 兼容极旧版本 sshd 或缺少可执行文件的环境。
     awk -v k="$key" '
         BEGIN { IGNORECASE=1 }
         /^[[:space:]]*#/ || NF < 2 { next }
-        $1 == k && !found { print $2; found=1; exit }
-    ' "$SSHD_DROPIN_FILE" "$SSHD_CONFIG" 2>/dev/null
+        $1 == k { print $2; exit }
+    ' "$SSHD_CONFIG" 2>/dev/null
+}
+
+sshd_supports_option() {
+    local option="$1"
+    sshd_effective_config | awk -v k="$option" 'tolower($1) == tolower(k) { found=1; exit } END { exit !found }'
 }
 
 get_ssh_port() {
     local p
     p=$(get_sshd_value Port)
-    echo "${p:-22}"
+    case "$p" in
+        ''|*[!0-9]*) echo 22 ;;
+        *) echo "$p" ;;
+    esac
+}
+
+get_sshd_listen_ports() {
+    local p
+    while read -r p; do
+        case "$p" in ''|*[!0-9]*) ;; *) printf '%s\n' "$p" ;; esac
+    done < <(sshd_effective_config | awk '$1 == "port" { print $2 }')
+}
+
+port_is_in_use() {
+    local port="$1"
+    if cmd_exists ss; then
+        ss -H -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" { found=1 } END { exit !found }'
+    elif cmd_exists netstat; then
+        netstat -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" { found=1 } END { exit !found }'
+    else
+        return 1
+    fi
 }
 
 detect_ssh_service() {
@@ -82,6 +120,12 @@ detect_ssh_service() {
             fi
         done
     fi
+    for unit in sshd ssh; do
+        if cmd_exists service && service "$unit" status >/dev/null 2>&1; then
+            echo "$unit"
+            return
+        fi
+    done
     echo "sshd"
 }
 
@@ -95,14 +139,14 @@ sshd_test() {
     local bin err
     bin=$(sshd_bin) || { ui_fail "未找到 sshd 命令，无法校验配置。"; return 1; }
     err=$(mktemp /tmp/sec_toolbox_sshd.XXXXXX)
-    if "$bin" -t -f "$SSHD_CONFIG" 2>"$err"; then
+    if ! "$bin" -t -f "$SSHD_CONFIG" 2>"$err"; then
+        ui_fail "sshd 配置校验失败："
+        sed 's/^/    /' "$err"
         rm -f "$err"
-        return 0
+        return 1
     fi
-    ui_fail "sshd 配置校验失败："
-    sed 's/^/    /' "$err"
     rm -f "$err"
-    return 1
+    return 0
 }
 
 create_ssh_backup() {
@@ -362,9 +406,13 @@ configure_ssh_port() {
     [ -z "$port" ] && { ui_warn "已取消。"; return 0; }
     [[ "$port" =~ ^[0-9]+$ ]] || { ui_fail "端口必须是数字。"; return 1; }
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { ui_fail "端口范围必须是 1-65535。"; return 1; }
-    if cmd_exists ss && ss -ltn | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
-        ui_fail "端口 $port 已被占用。"
-        return 1
+    if cmd_exists ss || cmd_exists netstat; then
+        if port_is_in_use "$port"; then
+            ui_fail "端口 $port 已被占用。"
+            return 1
+        fi
+    else
+        ui_warn "未找到 ss/netstat，跳过端口占用检查。"
     fi
     confirm_phrase "CHANGE PORT" "我已确认新端口已在云安全组/防火墙放行，继续修改？" || { ui_warn "已取消。"; return 1; }
     backup_dir=$(create_ssh_backup "change-port") || return 1

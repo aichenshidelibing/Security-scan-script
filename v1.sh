@@ -329,26 +329,30 @@ detect_kernel_ver() {
 kernel_ge() { awk -v k="$1" -v cur="$2" 'BEGIN{ exit !(cur+0 >= k+0) }'; }
 
 bbr_available_algos() {
-    sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null \
-        | awk -F'[:=]' 'NF>1 {gsub(/ /,"",$2); print $2; exit}'
+    # 以 sysctl 的实际返回值为准，不根据发行版或内核版本臆测算法名称。
+    # Debian 等发行版可能只提供 bbr，即使内核版本很新；bbr2/bbr3
+    # 通常需要额外补丁或模块，不能仅凭版本号选择。
+    sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null \
+        | tr '[:space:]' '\n' \
+        | sed '/^$/d' \
+        | sort -u
 }
 
-# 返回当前内核 + 已加载算法下可用的 BBR 变体名（空格分隔）
+# 返回当前内核实际可用的 BBR 变体名（空格分隔）。优先使用较新的变体。
 available_bbr_variants() {
-    local ver="$1" algos out=""
+    local algos out="" variant
     algos=$(bbr_available_algos)
-    [ -z "$algos" ] && return 0
-    if kernel_ge 4.9 "$ver" && [[ " $algos " == *" bbr "* ]]; then out="bbr"; fi
-    if kernel_ge 5.4 "$ver" && [[ " $algos " == *" bbr2 "* ]]; then out="${out:+$out }bbr2"; fi
-    if kernel_ge 6.5 "$ver" && [[ " $algos " == *" bbr3 "* ]]; then out="${out:+$out }bbr3"; fi
-    [ -n "$out" ] && echo "$out"
-    return 0
+    for variant in bbr3 bbr2 bbr; do
+        if printf '%s\n' "$algos" | grep -Fxq "$variant"; then
+            out="${out:+$out }$variant"
+        fi
+    done
+    [ -n "$out" ] && printf '%s\n' "$out"
 }
 
-# 旧的单变体探测，保留供默认菜单条目使用
+# 兼容旧调用：只要系统实际提供任一 BBR 变体即可。
 bbr_available() {
-    local ver; ver=$(detect_kernel_ver)
-    kernel_ge 4.9 "$ver" && [[ " $(bbr_available_algos) " == *" bbr "* ]]
+    [ -n "$(available_bbr_variants)" ]
 }
 
 SEC_BBR_VARIANT=""
@@ -356,21 +360,23 @@ SEC_BBR_VARIANT=""
 init_bbr_variants() {
     local ver avails last
     ver=$(detect_kernel_ver)
-    avails=$(available_bbr_variants "$ver")
+    avails=$(available_bbr_variants)
     if [ -z "$avails" ]; then
-        ui_warn "当前内核 ${ver} 不支持 BBR (需 4.9+ 且 tcp_bbr 已加载)。"
+        ui_warn "当前系统未提供可用的 BBR 算法（实际可用值为空），已跳过。"
         return 1
     fi
-    for v in $avails; do last="$v"; done
-    SEC_BBR_VARIANT="$last"
-    echo -e "${CYAN}${I_INFO} BBR 可用变体: ${GREEN}$avails${RESET} ${GREY}(内核 ${ver}; 默认 $last，菜单中可改)${RESET}"
+    SEC_BBR_VARIANT="${avails%% *}"
+    echo -e "${CYAN}${I_INFO} BBR 可用变体: ${GREEN}$avails${RESET} ${GREY}(内核 ${ver}; 默认 $SEC_BBR_VARIANT，菜单中可改)${RESET}"
     return 0
 }
 
 enable_bbr() {
     local variant="${1:-$SEC_BBR_VARIANT}" algos
     algos=$(bbr_available_algos)
-    [[ " $algos " != *" $variant "* ]] && { ui_fail "算法 $variant 不可用（仅支持: $algos）。"; return 1; }
+    if ! printf '%s\n' "$algos" | grep -Fxq "$variant"; then
+        ui_fail "算法 $variant 不可用（仅支持: $(printf '%s' "$algos" | tr '\n' ' ')）。"
+        return 1
+    fi
     sed -i '/^net.core.default_qdisc=/d;/^net.ipv4.tcp_congestion_control=/d' /etc/sysctl.conf
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=$variant" >> /etc/sysctl.conf
@@ -381,7 +387,7 @@ enable_bbr() {
 
 menu_bbr_pick() {
     local ver="$1" avails picked
-    avails=$(available_bbr_variants "$ver")
+    avails=$(available_bbr_variants)
     [ -z "$avails" ] && { ui_fail "当前内核不支持任何 BBR 变体。"; return 1; }
     while true; do
         clear
@@ -479,7 +485,11 @@ apply_fix() {
         "开启 TCP BBR 加速")
             if bbr_available; then
                 if [ -z "$SEC_BBR_VARIANT" ]; then init_bbr_variants >/dev/null 2>&1; fi
-                enable_bbr "$SEC_BBR_VARIANT" || menu_bbr_pick "$(detect_kernel_ver)"
+                if [ -n "$SEC_BBR_VARIANT" ]; then
+                    enable_bbr "$SEC_BBR_VARIANT" || menu_bbr_pick "$(detect_kernel_ver)"
+                else
+                    ui_warn "未找到可用的 BBR 变体，已跳过。"
+                fi
             else
                 ui_fail "当前内核未提供 tcp_bbr，已跳过。"
             fi ;;
