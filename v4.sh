@@ -16,6 +16,8 @@ I_FAIL=$([ "$USE_EMOJI" == "1" ] && echo "✗" || echo "[FAIL]")
 I_INFO=$([ "$USE_EMOJI" == "1" ] && echo "»" || echo "[i]")
 I_FIX=$([ "$USE_EMOJI" == "1" ] && echo "→" || echo "[FIX]")
 
+ui_line() { echo -e "${GREY}--------------------------------------------------------------------------------${RESET}"; }
+
 ui_info() { echo -e "${CYAN}${I_INFO} $*${RESET}"; }
 ui_ok()   { echo -e "${GREEN}${I_OK} $*${RESET}"; }
 ui_warn() { echo -e "${YELLOW}[!] $*${RESET}"; }
@@ -35,13 +37,12 @@ SEC_GITHUB_MIRRORS_DEFAULT=(
 
 write_mirror_list() {
     mkdir -p "$SEC_GITHUB_ACCEL_DIR" || return 1
-    : > "$SEC_GITHUB_ACCEL_FILE"
+    : > "$SEC_GITHUB_ACCEL_FILE" || return 1
     local mirror
     for mirror in "${SEC_GITHUB_MIRRORS_DEFAULT[@]}"; do
-        echo "$mirror" >> "$SEC_GITHUB_ACCEL_FILE"
+        echo "$mirror" >> "$SEC_GITHUB_ACCEL_FILE" || return 1
     done
     chmod 0644 "$SEC_GITHUB_ACCEL_FILE"
-    return 0
 }
 
 show_mirrors() {
@@ -56,7 +57,8 @@ show_mirrors() {
 }
 
 probe_mirror() {
-    local m="$1" code=0
+    # 测试实际 raw 文件，而非通常返回 400/404 的 raw 服务根路径。
+    local m="${1%/}/git/git/master/README.md" code=0
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --connect-timeout 3 --max-time 8 -o /dev/null "$m" >/dev/null 2>&1 || code=$?
     elif command -v wget >/dev/null 2>&1; then
@@ -81,7 +83,12 @@ auto_pick_mirror() {
         fi
     done
     if [ -n "$best" ]; then
-        write_mirror_list
+        local -a ordered=("$best")
+        for m in "${SEC_GITHUB_MIRRORS_DEFAULT[@]}"; do
+            [ "$m" = "$best" ] || ordered+=("$m")
+        done
+        SEC_GITHUB_MIRRORS_DEFAULT=("${ordered[@]}")
+        write_mirror_list || return 1
         ui_ok "已写入加速源列表 (${SEC_GITHUB_ACCEL_FILE})。"
         return 0
     fi
@@ -109,40 +116,40 @@ detect_warp() {
     return 1
 }
 
-warp_install_official() {
+warp_install_official() (
     ui_info "添加 Cloudflare 官方 APT 源..."
     command -v apt-get >/dev/null 2>&1 || { ui_fail "未找到 apt-get。"; return 1; }
-    local keyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
+    command -v gpg >/dev/null 2>&1 || { ui_fail "缺少 gpg，请先安装 gnupg。"; return 1; }
+    # 官方源的 suite 是发行版代号 (bookworm/noble 等)，不是 debian/ubuntu。
+    . /etc/os-release
+    case "${ID:-}" in
+        debian|ubuntu) ;;
+        *) ui_fail "当前系统非 Debian/Ubuntu，无法通过 APT 安装官方 WARP。"; return 1 ;;
+    esac
+    local codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+    [[ "$codename" =~ ^[a-z][a-z0-9-]*$ ]] || { ui_fail "无法识别发行版代号。"; return 1; }
+    local keyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg" tmp
+    tmp=$(mktemp -d) || return 1
+    trap 'rm -rf -- "$tmp"' EXIT
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --connect-timeout 5 --max-time 30 -o "$keyring" https://pkg.cloudflareclient.com/pubkey.gpg 2>/dev/null
+        curl -fsSL --connect-timeout 5 --max-time 30 -o "$tmp/pubkey" https://pkg.cloudflareclient.com/pubkey.gpg || return 1
     elif command -v wget >/dev/null 2>&1; then
-        wget -q --timeout=10 --tries=1 -O "$keyring" https://pkg.cloudflareclient.com/pubkey.gpg 2>/dev/null
+        wget -q --timeout=10 --tries=1 -O "$tmp/pubkey" https://pkg.cloudflareclient.com/pubkey.gpg || return 1
     else
         ui_fail "需要 curl 或 wget 下载 Cloudflare 签名密钥。"
         return 1
     fi
-    if [ ! -s "$keyring" ]; then
-        ui_fail "无法下载 Cloudflare GPG 密钥，已停止安装。"
-        rm -f "$keyring"
+    # 官方下载是 ASCII armor，必须转换后才能作为 .gpg keyring 使用。
+    gpg --batch --yes --dearmor --output "$tmp/keyring.gpg" "$tmp/pubkey" || return 1
+    install -m 0644 "$tmp/keyring.gpg" "$keyring" || return 1
+    printf 'deb [signed-by=%s] https://pkg.cloudflareclient.com/ %s main\n' "$keyring" "$codename" \
+        > /etc/apt/sources.list.d/cloudflare-client.list || return 1
+    apt-get update -o Acquire::Retries=2 && apt-get install -y cloudflare-warp || {
+        ui_fail "官方 WARP 安装失败，请检查该发行版代号是否受支持。"
         return 1
-    fi
-    . /etc/os-release
-    local distro=""
-    case "${ID:-}" in
-        debian) distro="debian" ;;
-        ubuntu) distro="ubuntu" ;;
-        *) ui_fail "当前系统非 Debian/Ubuntu，无法通过 APT 安装官方 WARP。"; return 1 ;;
-    esac
-    echo "deb [signed-by=$keyring] https://pkg.cloudflareclient.com/ $distro main" > /etc/apt/sources.list.d/cloudflare-client.list
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -o Acquire::Retries=2 >/dev/null 2>&1 && apt-get install -y cloudflare-warp || {
-            ui_fail "官方 WARP 安装失败。"
-            return 1
-        }
-    fi
-    detect_warp && return 0
-    return 1
-}
+    }
+    detect_warp
+)
 
 warp_install_go() {
     local arch url
@@ -196,6 +203,8 @@ warp_status() {
     fi
 }
 
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+[ "$(id -u)" -eq 0 ] || { ui_fail "请以 root 运行本脚本。"; exit 1; }
 while true; do
     clear
     echo -e "${BOLD}${CYAN}WARP + GitHub 加速源 自动配置中心${RESET}"
@@ -221,3 +230,5 @@ while true; do
         *) ui_warn "无效选择"; sleep 1 ;;
     esac
 done
+
+fi

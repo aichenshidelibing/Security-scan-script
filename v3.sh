@@ -28,7 +28,7 @@ BOLD=$(printf '\033[1m')
 
 # 根据环境定义图标
 if [ "$USE_EMOJI" == "1" ]; then
-    I_OK="✅"; I_WARN="⚠️ "; I_INFO="ℹ️ "; I_LOCK="🚫"; I_UNLOCK="🟢"
+    I_FAIL="❌"; I_OK="✅"; I_WARN="⚠️ "; I_INFO="ℹ️ "; I_LOCK="🚫"; I_UNLOCK="🟢"
 else
     I_OK="[  OK  ]"; I_WARN="[ WARN ]"; I_FAIL="[ FAIL ]"; I_INFO="[ INFO ]"; I_LOCK="[禁]"; I_UNLOCK="[放]"
 fi
@@ -51,7 +51,7 @@ cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 # --- 1. 防火墙自动检测 ---
 detect_firewall() {
     if cmd_exists firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then FW_TYPE="firewalld"; return; fi
-    if cmd_exists ufw && ufw status >/dev/null 2>&1; then FW_TYPE="ufw"; return; fi
+    if cmd_exists ufw && ufw status 2>/dev/null | grep -q "^Status: active$"; then FW_TYPE="ufw"; return; fi
     if cmd_exists nft && nft list ruleset >/dev/null 2>&1; then FW_TYPE="nftables"; return; fi
     if cmd_exists iptables && iptables -S >/dev/null 2>&1; then FW_TYPE="iptables"; return; fi
     FW_TYPE="none"
@@ -76,13 +76,41 @@ ensure_nft_chain() {
 apply_nft_block() {
     ensure_nft_chain || return 1
     nft list chain inet sec_toolbox input 2>/dev/null | grep -q 'icmp type echo-request drop' || \
-        nft add rule inet sec_toolbox input icmp type echo-request drop 2>/dev/null
+        nft add rule inet sec_toolbox input icmp type echo-request drop 2>/dev/null || return 1
     nft list chain inet sec_toolbox input 2>/dev/null | grep -q 'icmpv6 type echo-request drop' || \
         nft add rule inet sec_toolbox input icmpv6 type echo-request drop 2>/dev/null
 }
 
 apply_nft_allow() {
-    nft delete table inet sec_toolbox 2>/dev/null || true
+    if nft list table inet sec_toolbox >/dev/null 2>&1; then
+        nft delete table inet sec_toolbox 2>/dev/null
+    fi
+}
+
+UFW_RULES="/etc/ufw/before.rules"
+apply_ufw_ping() {
+    local mode="$1" tmp backup
+    [ -f "$UFW_RULES" ] || return 1
+    tmp=$(mktemp) || return 1
+    backup=$(mktemp) || { rm -f "$tmp"; return 1; }
+    cp -p "$UFW_RULES" "$backup" || { rm -f "$tmp" "$backup"; return 1; }
+    # 只管理 IPv4 Echo；规则必须位于已有 ACCEPT 之前，且重复应用不重复插入。
+    if ! awk -v mode="$mode" '
+        /DISABLE_PING/ { getline; next }
+        !inserted && /^-A ufw-before-input[[:space:]]/ && mode=="block" {
+            print "# DISABLE_PING"
+            print "-A ufw-before-input -p icmp --icmp-type echo-request -j DROP"
+            inserted=1
+        }
+        { print }
+        END { if (mode=="block" && !inserted) exit 1 }
+    ' "$UFW_RULES" > "$tmp" || ! cat "$tmp" > "$UFW_RULES" || ! ufw reload >/dev/null 2>&1; then
+        cp -p "$backup" "$UFW_RULES"
+        ufw reload >/dev/null 2>&1 || true
+        rm -f "$tmp" "$backup"
+        return 1
+    fi
+    rm -f "$tmp" "$backup"
 }
 
 add_item() {
@@ -94,7 +122,8 @@ add_item() {
     
     # 真实状态检测
     if eval "$4"; then STATUS[$COUNT]="BLOCKED"; else STATUS[$COUNT]="ALLOWED"; fi
-    SELECTED[$COUNT]="FALSE" # 默认不选中，由用户手动决定
+    # 未翻转的项目保持现状，不能在重新审计后默认变成“放行”。
+    if [ "${STATUS[$COUNT]}" = "BLOCKED" ]; then SELECTED[$COUNT]="TRUE"; else SELECTED[$COUNT]="FALSE"; fi
 }
 
 audit_all() {
@@ -107,34 +136,37 @@ audit_all() {
     local fw_cmd="false"
     case "$FW_TYPE" in
         firewalld) fw_cmd="firewall-cmd --query-icmp-block=echo-request >/dev/null 2>&1" ;;
-        ufw)       fw_cmd="grep -q 'DISABLE_PING' /etc/ufw/before.rules 2>/dev/null" ;;
+        ufw)       fw_cmd="grep -q 'DISABLE_PING' \"$UFW_RULES\" 2>/dev/null" ;;
         iptables)  fw_cmd="iptables -C INPUT -p icmp --icmp-type echo-request -j DROP >/dev/null 2>&1" ;;
         nftables)  fw_cmd="nft_rule_exists_v4" ;;
     esac
     
-    add_item "防火墙禁 Ping (IPv4/v6)" "全面隐身，包含 IPv6" "属于防火墙规则变更" "$fw_cmd"
+    add_item "防火墙禁 Ping" "阻断 Echo 请求；IPv6 支持取决于后端" "属于防火墙规则变更，不代表无法探测" "$fw_cmd"
 }
 
 # --- 3. 执行应用逻辑 ---
 apply_action() {
     local id=$1
     local title="${TITLES[$id]}"
-    
+    if [[ "$title" == *"防火墙"* && "$FW_TYPE" == none ]]; then
+        if [ "${SELECTED[$id]}" = "TRUE" ]; then ui_fail "未找到可用防火墙。"; return 1; fi
+        return 0
+    fi
+
     if [ "${SELECTED[$id]}" == "TRUE" ]; then
         # === 执行禁止 (Block) ===
         echo -e "   ${CYAN}>> 执行: ${I_LOCK} 禁用 Ping ($title)...${RESET}"
         case "$title" in
             *"内核层"*)
                 echo "net.ipv4.icmp_echo_ignore_all = 1" > /etc/sysctl.d/99-disable-ping.conf
+                [ "$?" -eq 0 ] || return 1
                 sysctl --system >/dev/null 2>&1 ;;
             *"防火墙"*)
                 case "$FW_TYPE" in
-                    firewalld) firewall-cmd --add-icmp-block=echo-request --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 ;;
-                    ufw) 
-                        [ -f /etc/ufw/before.rules ] && ! grep -q "DISABLE_PING" /etc/ufw/before.rules && sed -i '/ufw-before-input.*-j DROP/i # DISABLE_PING\n-A ufw-before-input -p icmp --icmp-type echo-request -j DROP' /etc/ufw/before.rules
-                        ufw reload >/dev/null 2>&1 ;;
+                    firewalld) firewall-cmd --add-icmp-block=echo-request --permanent >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 ;;
+                    ufw) apply_ufw_ping block ;;
                     nftables)
-                        if ! apply_nft_block; then ui_fail "nftables 规则应用失败"; fi
+                        apply_nft_block
                         ;;
                     iptables) iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -I INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ;;
                 esac ;;
@@ -146,8 +178,8 @@ apply_action() {
             *"内核层"*) rm -f /etc/sysctl.d/99-disable-ping.conf; sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1 ;;
             *"防火墙"*)
                 case "$FW_TYPE" in
-                    firewalld) firewall-cmd --remove-icmp-block=echo-request --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 ;;
-                    ufw) sed -i '/DISABLE_PING/,+1d' /etc/ufw/before.rules 2>/dev/null; ufw reload >/dev/null 2>&1 ;;
+                    firewalld) firewall-cmd --remove-icmp-block=echo-request --permanent >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 ;;
+                    ufw) apply_ufw_ping allow ;;
                     nftables) apply_nft_allow ;;
                     iptables) while iptables -D INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null; do :; done ;;
                 esac ;;
@@ -156,6 +188,8 @@ apply_action() {
 }
 
 # --- 4. 主循环界面 ---
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+[ "$(id -u)" -eq 0 ] || { ui_fail "请以 root 运行本脚本。"; exit 1; }
 detect_firewall
 audit_all
 
@@ -196,8 +230,9 @@ while true; do
         q|Q) clear; exit 0 ;; # 返回主控台
         r|R) 
             echo ""; ui_info "正在应用 ICMP 策略..."
-            for ((i=1; i<=COUNT; i++)); do apply_action "$i"; done
-            ui_ok "操作完成。"
+            failed=0
+            for ((i=1; i<=COUNT; i++)); do apply_action "$i" || failed=1; done
+            if [ "$failed" -eq 0 ]; then ui_ok "操作完成。"; else ui_fail "部分策略应用失败，请检查权限和防火墙配置。"; fi
             audit_all # 刷新状态
             sleep 2 ;;
         *)
@@ -208,3 +243,5 @@ while true; do
             done ;;
     esac
 done
+
+fi

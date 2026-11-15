@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# SEC_TOOLBOX_VERSION=4.0.0
+# SEC_TOOLBOX_VERSION=4.1.0
 # install.sh - Linux 安全工具箱主控台 (v4.0 增强版)
 # 特性：版本自检 | 本地模式 | BBR 多版本 | v4 出口加速中心 | 统一 emoji
 
 export LC_ALL=C
+# 子脚本与下载目标始终相对于主控台，而不是调用者的当前目录。
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || exit 1
+cd -- "$SCRIPT_DIR" || exit 1
 
 # --- [手动修正位] 如果标题或状态依然显示方块乱码，请将 0 改为 1 ---
 FORCE_TEXT_MODE=0
@@ -24,7 +27,7 @@ export SEC_LOCAL_MODE
 GITHUB_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
 GITHUB_RAW_BASE="https://github.com/aichenshidelibing/Security-scan-script/raw/refs/heads/main"
 TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>"
-SEC_TOOLBOX_VERSION="${SEC_TOOLBOX_VERSION:-4.0.0}"
+SEC_TOOLBOX_VERSION="${SEC_TOOLBOX_VERSION:-4.1.0}"
 SEC_TOOLBOX_VERSION_URL="${SEC_TOOLBOX_VERSION_URL:-$GITHUB_BASE/install.sh}"
 SEC_UPDATE_CHECK="${SEC_UPDATE_CHECK:-1}"
 
@@ -65,6 +68,8 @@ show_dashboard() {
     clear
     local os_info=""; [ -f /etc/os-release ] && os_info=$(grep "^PRETTY_NAME" /etc/os-release | cut -d= -f2 | tr -d '"') || os_info=$(cat /etc/issue | head -n 1)
     local ip_addr=$(hostname -I 2>/dev/null | cut -d' ' -f1); [ -z "$ip_addr" ] && ip_addr="127.0.0.1"
+    local mode_tag=""
+    [ "$SEC_LOCAL_MODE" = 1 ] && mode_tag=" [本地模式]"
     local time_now=$(date "+%Y-%m-%d %H:%M")
     local user_now=$(whoami)
 
@@ -79,7 +84,20 @@ show_dashboard() {
 # --- 核心函数：下载 ---
 download_script() {
     local name="$1"
-    local url="${GITHUB_BASE}/${name}"
+    case "$name" in
+        v[1-4].sh|lib/platform.sh|lib/apt.sh|lib/bbr.sh|lib/apt-rewrite.awk|platforms/debian.sh|platforms/ubuntu.sh|platforms/rhel.sh) ;;
+        *) ui_fail "无效组件路径: $name"; return 1 ;;
+    esac
+    local url="${GITHUB_BASE}/${name}" mirror
+    local mirror_file="${SEC_GITHUB_ACCEL_FILE:-/etc/sec-toolbox/github-mirrors}"
+    # v4 保存的首选源在下一次下载时生效；按数据读取，绝不 source 配置。
+    if [ -f "$mirror_file" ]; then
+        while IFS= read -r mirror || [ -n "$mirror" ]; do
+            [[ "$mirror" =~ ^https://[^[:space:]]+$ ]] || continue
+            url="${mirror%/}/aichenshidelibing/Security-scan-script/main/${name}"
+            break
+        done < "$mirror_file"
+    fi
 
     if [ "$SEC_LOCAL_MODE" = 1 ]; then
         if [ -f "$name" ]; then
@@ -90,25 +108,52 @@ download_script() {
         return 1
     fi
 
+    local tmp ok=0
+    mkdir -p -- "$(dirname "$name")" || return 1
+    tmp=$(mktemp "$(dirname "$name")/.$(basename "$name").XXXXXX") || return 1
     echo -ne "${CYAN}${I_DL} 正在获取 ${name}... ${RESET}"
     if cmd_exists wget; then
-        wget -q -O "$name" "$url"
+        wget -q --timeout=15 --tries=2 -O "$tmp" "$url" && ok=1
     elif cmd_exists curl; then
-        curl -s -o "$name" "$url"
-    else
-        echo -e "${RED}失败 (缺少工具)${RESET}"
-        return 1
+        curl -fsSL --connect-timeout 10 --max-time 60 -o "$tmp" "$url" && ok=1
     fi
+    # 下载失败/HTML 错误页不能覆盖已有可用脚本；标记和语法检查不是签名验证。
+    if [ "$ok" -eq 1 ] && [ -s "$tmp" ] &&
+       sed -i 's/\r$//' "$tmp" && grep -Fq "$TAG_MARKER" "$tmp" && validate_component "$name" "$tmp"; then
+        if chmod +x "$tmp" && mv -f -- "$tmp" "$name"; then
+            echo -e "${GREEN}成功${RESET}"
+            return 0
+        fi
+    fi
+    rm -f -- "$tmp"
+    echo -e "${RED}失败 (下载或校验失败，原文件未替换)${RESET}"
+    return 1
+}
 
-    if [ -s "$name" ]; then
-        sed -i 's/\r$//' "$name" 2>/dev/null
-        chmod +x "$name"
-        echo -e "${GREEN}成功${RESET}"
-        return 0
+# 公共逻辑只维护一份，平台适配文件仅下载当前发行版对应的一份。
+validate_component() {
+    if [[ "$1" == *.awk ]]; then
+        awk -f "$2" /dev/null >/dev/null
     else
-        echo -e "${RED}失败 (文件无效)${RESET}"
-        return 1
+        bash -n "$2"
     fi
+}
+ensure_platform() {
+    if [ ! -f lib/platform.sh ]; then download_script lib/platform.sh || return 1; fi
+    source ./lib/platform.sh
+    detect_platform || return 1
+}
+download_module() {
+    local name="$1" part
+    if [ "$name" = v1.sh ]; then
+        download_script lib/platform.sh || return 1
+        source ./lib/platform.sh
+        detect_platform || return 1
+        for part in lib/apt.sh lib/bbr.sh lib/apt-rewrite.awk "platforms/$SEC_PLATFORM.sh" v2.sh; do
+            download_script "$part" || return 1
+        done
+    fi
+    download_script "$name"
 }
 
 # --- 启动预检查：检查远端是否有更新版本（可跳过） ---
@@ -116,7 +161,7 @@ check_update() {
     [ "$SEC_LOCAL_MODE" = 1 ] && return 0
     [ "$SEC_UPDATE_CHECK" != 1 ] && return 0
     local remote_ver="" tmp
-    tmp=$(mktemp 2>/dev/null) || tmp="/tmp/sec_toolbox_check_$$"
+    tmp=$(mktemp 2>/dev/null) || return 1
     if cmd_exists curl; then
         curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp" "$SEC_TOOLBOX_VERSION_URL" >/dev/null 2>&1
     elif cmd_exists wget; then
@@ -140,8 +185,9 @@ check_update() {
 
 # --- 本地自检：语法与基础完整性 ---
 self_check() {
-    local scripts="install.sh v0.sh v1.sh v2.sh v3.sh v4.sh"
-    local failed=0
+    local scripts="install.sh v1.sh v2.sh v3.sh v4.sh lib/platform.sh lib/apt.sh lib/bbr.sh platforms/${SEC_PLATFORM:-unknown}.sh"
+    local failed=0 err
+    err=$(mktemp) || return 1
 
     echo ""
     echo -e "${BOLD}${I_CHECK} 本地自检 / 语法检查${RESET}"
@@ -153,15 +199,15 @@ self_check() {
         fi
 
         echo -ne "${CYAN}检查 $script ... ${RESET}"
-        if bash -n "$script" 2>/tmp/sec_toolbox_check.err; then
+        if bash -n "$script" 2>"$err"; then
             echo -e "${GREEN}通过${RESET}"
         else
             echo -e "${RED}失败${RESET}"
-            sed 's/^/    /' /tmp/sec_toolbox_check.err
+            sed 's/^/    /' "$err"
             failed=1
         fi
     done
-    rm -f /tmp/sec_toolbox_check.err
+    rm -f "$err"
     ui_line
 
     if [ "$failed" -eq 0 ]; then
@@ -179,7 +225,6 @@ menu_download() {
         show_dashboard
         echo -e "${BOLD}下载/更新中心${RESET}"
         ui_line
-        echo " [0] 下载 v0.sh (全维安全审计)"
         echo " [1] 下载 v1.sh (全能管家/修复)"
         echo " [2] 下载 v2.sh (SSH密钥配置)"
         echo " [3] 下载 v3.sh (网络隐身/禁Ping)"
@@ -192,10 +237,12 @@ menu_download() {
         read -r dl_choice
 
         case "$dl_choice" in
-            [0-3]) download_script "v${dl_choice}.sh"; sleep 1 ;;
+            [1-3]) download_module "v${dl_choice}.sh"; sleep 1 ;;
             4) download_script "v4.sh"; sleep 1 ;;
-            a|A) for s in v0.sh v1.sh v2.sh v3.sh v4.sh; do download_script "$s"; done
-                ui_ok "同步完成。"; sleep 1; return ;;
+            a|A) local failed=0
+                for s in v1.sh v2.sh v3.sh v4.sh; do download_module "$s" || failed=1; done
+                if [ "$failed" -eq 0 ]; then ui_ok "同步完成。"; else ui_fail "部分脚本下载失败，已保留原文件。"; fi
+                sleep 1; return ;;
             q|Q) return ;;
         esac
     done
@@ -210,7 +257,7 @@ cleanup_scripts() {
     local files=()
     local f
 
-    for f in *.sh; do
+    for f in *.sh lib/*.sh lib/*.awk platforms/*.sh; do
         [ -e "$f" ] || continue
         [ "$f" = "$current_script" ] && continue
         grep -q "$TAG_MARKER" "$f" 2>/dev/null && files+=("$f")
@@ -240,8 +287,6 @@ main_menu() {
         
         echo -e "${BOLD}工具列表${RESET}"
         ui_line
-        printf " [0] %-30s [状态: %s]\n" "全维审计 (v0.sh)" "$(st v0.sh)"
-        echo -e "     ${GREY}└─ 只查不改 / 硬件仪表盘 / 安全精简审计 / 评分报告${RESET}"
         printf " [1] %-30s [状态: %s]\n" "基础管家 (v1.sh)" "$(st v1.sh)"
         echo -e "     ${GREY}└─ APT源优化 / 基础工具 / SSH低风险项 / 权限与日志修复${RESET}"
         printf " [2] %-30s [状态: %s]\n" "SSH策略中心 (v2.sh)" "$(st v2.sh)"
@@ -259,7 +304,7 @@ main_menu() {
         read -r CHOICE
 
         case "$CHOICE" in
-            [0-4])
+            [1-4])
                 local S="v${CHOICE}.sh"
                 if [ -f "$S" ]; then bash ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;
@@ -272,24 +317,34 @@ main_menu() {
 }
 
 # --- 前置检查 ---
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 [ "$(id -u)" -eq 0 ] || { echo -e "${RED}${I_FAIL} 错误: 请使用 root 权限运行。${RESET}"; exit 1; }
+
+# 先识别明确支持的发行版，再下载对应组件。
+ensure_platform || exit 1
+printf "检测到: %s %s (%s)，适配: %s\n" "$SEC_OS_ID" "$SEC_OS_VERSION" "$SEC_ARCH" "$SEC_PLATFORM"
 
 # 启动预检查：检测远端版本
 [ "$SEC_LOCAL_MODE" = 1 ] || check_update
 
-# v0/v1/v2 默认自动下载；v3 按需；v4 按需（主菜单不出现）
+# v1/v2 默认自动下载；v3 按需；v4 按需（主菜单不出现）
 NEED_INIT=0
-for core in v0.sh v1.sh v2.sh; do
-    [ ! -x "$core" ] && NEED_INIT=1
+for core in v1.sh v2.sh lib/apt.sh lib/bbr.sh lib/apt-rewrite.awk "platforms/$SEC_PLATFORM.sh"; do
+    [ ! -f "$core" ] && NEED_INIT=1
 done
 
 if [ "$NEED_INIT" = 1 ] && [ "$SEC_LOCAL_MODE" != 1 ]; then
     show_dashboard
     echo -e "${YELLOW}${I_WARN} 检测到核心组件缺失，正在进行初始化下载...${RESET}"
-    download_script "v0.sh"
-    download_script "v1.sh"
-    download_script "v2.sh"
+    download_module "v1.sh" || exit 1
+    download_script "v2.sh" || exit 1
     sleep 1
 fi
 
+if [ "$NEED_INIT" = 1 ] && [ "$SEC_LOCAL_MODE" = 1 ]; then
+    ui_fail "本地模式组件不完整，请使用完整项目或联网下载当前系统组件。"
+    exit 1
+fi
 main_menu
+
+fi

@@ -71,9 +71,9 @@ get_sshd_value() {
     fi
     # 兼容极旧版本 sshd 或缺少可执行文件的环境。
     awk -v k="$key" '
-        BEGIN { IGNORECASE=1 }
         /^[[:space:]]*#/ || NF < 2 { next }
-        $1 == k { print $2; exit }
+        tolower($1) == "match" { exit }
+        tolower($1) == tolower(k) { print $2; exit }
     ' "$SSHD_CONFIG" 2>/dev/null
 }
 
@@ -150,55 +150,56 @@ sshd_test() {
 }
 
 create_ssh_backup() {
-    local reason="${1:-manual}"
-    local dir="${BACKUP_ROOT}/ssh_$(date +'%Y%m%d_%H%M%S')"
-    mkdir -p "$dir" || { ui_fail "无法创建备份目录: $dir" >&2; return 1; }
-    [ -f "$SSHD_CONFIG" ] && cp -a "$SSHD_CONFIG" "$dir/sshd_config" || {
-        [ ! -f "$SSHD_CONFIG" ] || { ui_fail "无法备份 $SSHD_CONFIG" >&2; return 1; }
-    }
-    [ -f "$SSHD_DROPIN_FILE" ] && cp -a "$SSHD_DROPIN_FILE" "$dir/99-sec-toolbox.conf" || {
-        [ ! -f "$SSHD_DROPIN_FILE" ] || { ui_fail "无法备份 $SSHD_DROPIN_FILE" >&2; return 1; }
-    }
-    [ -f "$AUTH_KEYS" ] && cp -a "$AUTH_KEYS" "$dir/authorized_keys" || {
-        [ ! -f "$AUTH_KEYS" ] || { ui_fail "无法备份 $AUTH_KEYS" >&2; return 1; }
-    }
-    [ -f "$KEY_PATH" ] && cp -a "$KEY_PATH" "$dir/id_ed25519"
-    [ -f "${KEY_PATH}.pub" ] && cp -a "${KEY_PATH}.pub" "$dir/id_ed25519.pub"
+    local reason="${1:-manual}" dir file
+    mkdir -p "$BACKUP_ROOT" || return 1
+    chmod 700 "$BACKUP_ROOT" || return 1
+    # 同一秒内的生成/部署也必须有独立快照，不能相互覆盖。
+    dir=$(mktemp -d "${BACKUP_ROOT}/ssh_$(date +'%Y%m%d_%H%M%S_%N').XXXXXX") || return 1
+    for file in "$SSHD_CONFIG" "$SSHD_DROPIN_FILE" "$AUTH_KEYS" "$KEY_PATH" "${KEY_PATH}.pub"; do
+        if [ -e "$file" ]; then
+            cp -a "$file" "$dir/$(basename "$file")" || {
+                ui_fail "备份失败: $file" >&2
+                rm -rf -- "$dir"
+                return 1
+            }
+        fi
+    done
     {
         echo "reason=$reason"
         echo "time=$(date +'%F %T')"
         echo "port=$(get_ssh_port)"
         echo "password_auth=$(get_sshd_value PasswordAuthentication)"
         echo "root_login=$(get_sshd_value PermitRootLogin)"
-    } > "$dir/manifest.txt"
+    } > "$dir/manifest.txt" || return 1
     echo "$dir"
 }
 
 restore_ssh_backup() {
     local dir="$1"
     [ -d "$dir" ] || { ui_fail "备份目录不存在: $dir"; return 1; }
-    [ -f "$dir/sshd_config" ] && cp -a "$dir/sshd_config" "$SSHD_CONFIG"
+    [ -f "$dir/sshd_config" ] || { ui_fail "备份缺少 sshd_config，拒绝恢复。"; return 1; }
+    cp -a "$dir/sshd_config" "$SSHD_CONFIG" || return 1
     if [ -f "$dir/99-sec-toolbox.conf" ]; then
-        mkdir -p "$SSHD_DROPIN_DIR"
-        cp -a "$dir/99-sec-toolbox.conf" "$SSHD_DROPIN_FILE"
+        mkdir -p "$SSHD_DROPIN_DIR" || return 1
+        cp -a "$dir/99-sec-toolbox.conf" "$SSHD_DROPIN_FILE" || return 1
     else
-        rm -f "$SSHD_DROPIN_FILE"
+        rm -f "$SSHD_DROPIN_FILE" || return 1
     fi
     if [ -f "$dir/authorized_keys" ]; then
-        mkdir -p /root/.ssh || return 1
+        mkdir -p "$(dirname "$AUTH_KEYS")" || return 1
         cp -a "$dir/authorized_keys" "$AUTH_KEYS" || return 1
     else
-        rm -f "$AUTH_KEYS"
+        rm -f "$AUTH_KEYS" || return 1
     fi
     if [ -f "$dir/id_ed25519" ]; then
         cp -a "$dir/id_ed25519" "$KEY_PATH" || return 1
     else
-        rm -f "$KEY_PATH"
+        rm -f "$KEY_PATH" || return 1
     fi
     if [ -f "$dir/id_ed25519.pub" ]; then
         cp -a "$dir/id_ed25519.pub" "${KEY_PATH}.pub" || return 1
     else
-        rm -f "${KEY_PATH}.pub"
+        rm -f "${KEY_PATH}.pub" || return 1
     fi
     if sshd_test; then
         ui_ok "已恢复备份: $dir"
@@ -260,11 +261,78 @@ remove_managed_block() {
 append_managed_block() {
     local backup_dir="$1"
     shift
+    local -a policy=()
+    local line old_key new_key key_lc found i
+    # 不完整/嵌套的标记不能交给 sed 删除，否则可能截断整份配置。
+    awk -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" '
+        $0 == begin { if (inside || seen++) bad=1; inside=1 }
+        $0 == end { if (!inside) bad=1; inside=0 }
+        END { exit (bad || inside) }
+    ' "$SSHD_CONFIG" || { ui_fail "SSH 托管策略块损坏，请先恢复备份。"; return 1; }
+
+    # 保留已有托管策略，只替换本次明确修改的项目。否则“改端口”后再
+    # 部署密钥会把 Port 行一起删掉，sshd 随即回退到默认 22 端口。
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        read -r old_key _ <<< "$line"
+        [ -n "$old_key" ] || continue
+        key_lc=${old_key,,}
+        # 旧 drop-in 只迁移全局、单值策略；Match/Include 不能安全拼入主块。
+        case "$key_lc" in match|include)
+            ui_fail "旧托管配置包含 $old_key，拒绝自动迁移。"; return 1 ;;
+        esac
+        found=0
+        for i in "${!policy[@]}"; do
+            read -r new_key _ <<< "${policy[$i]}"
+            [ "${new_key,,}" = "$key_lc" ] && found=1
+        done
+        [ "$found" -eq 1 ] || policy+=("$line")
+    done < <(
+        awk -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" \
+            '$0 == begin { inside=1; next } $0 == end { inside=0; next } inside { print }' "$SSHD_CONFIG"
+        # 兼容旧版本使用的独立 drop-in，迁移时同样不能丢策略。
+        [ ! -f "$SSHD_DROPIN_FILE" ] || cat "$SSHD_DROPIN_FILE"
+    )
+
+    local has_port=0 requested_port=""
+    for line in "$@"; do
+        read -r new_key _ <<< "$line"
+        [ -n "$new_key" ] || continue
+        key_lc=$(printf '%s' "$new_key" | tr '[:upper:]' '[:lower:]')
+        if [ "$key_lc" = "port" ]; then
+            has_port=1
+            read -r _ requested_port <<< "$line"
+        fi
+        found=0
+        for i in "${!policy[@]}"; do
+            read -r old_key _ <<< "${policy[$i]}"
+            old_key=$(printf '%s' "$old_key" | tr '[:upper:]' '[:lower:]')
+            if [ "$old_key" = "$key_lc" ]; then
+                policy[$i]="$line"
+                found=1
+                break
+            fi
+        done
+        [ "$found" -eq 1 ] || policy+=("$line")
+    done
+
     remove_managed_block || {
         ui_fail "无法清理旧的 SSH 托管策略。"
         auto_rollback_on_failure "$backup_dir"
         return 1
     }
+
+    # Port 与其他 sshd 选项不同：多个 Port 会同时监听。首次托管端口时
+    # 移除主配置中的旧 Port，确保“修改端口”不会变成同时开放 22 和新端口。
+    if [ "$has_port" -eq 1 ]; then
+        sed -i -E '/^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]]+/d' "$SSHD_CONFIG" || {
+            ui_fail "无法清理旧的 SSH 端口配置。"
+            auto_rollback_on_failure "$backup_dir"
+            return 1
+        }
+    fi
+
     # 不受 Include 顺序或发行版默认 drop-in 内容影响。
     local tmpconf
     tmpconf=$(mktemp /tmp/sec_toolbox_sshd.XXXXXX) || {
@@ -274,7 +342,7 @@ append_managed_block() {
     }
     {
         echo "$MANAGED_BEGIN"
-        for kv in "$@"; do echo "$kv"; done
+        printf '%s\n' "${policy[@]}"
         echo "$MANAGED_END"
         cat "$SSHD_CONFIG"
     } > "$tmpconf" || {
@@ -295,7 +363,25 @@ append_managed_block() {
         auto_rollback_on_failure "$backup_dir"
         return 1
     fi
+    if [ "$has_port" -eq 1 ]; then
+        local ports
+        ports=$(get_sshd_listen_ports | sort -un)
+        if [ "$ports" != "$requested_port" ]; then
+            ui_fail "端口配置未唯一生效（检测到: $ports）。请检查其他 Include 中的 Port；已回滚。"
+            auto_rollback_on_failure "$backup_dir"
+            return 1
+        fi
+    fi
     return 0
+}
+
+# 配置校验成功不代表服务重载成功；后者失败时也要恢复磁盘与服务状态。
+activate_ssh_policy() {
+    local backup_dir="$1"
+    if reload_ssh_safe; then return 0; fi
+    auto_rollback_on_failure "$backup_dir" || return 1
+    reload_ssh_safe || ui_fail "旧配置已恢复，但服务仍无法启动；请通过控制台检查。"
+    return 1
 }
 
 confirm_phrase() {
@@ -371,8 +457,8 @@ install_pubkey() {
     local backup_dir pub
     backup_dir=$(create_ssh_backup "install-pubkey") || return 1
     [ -f "${KEY_PATH}.pub" ] || { ui_fail "未找到 ${KEY_PATH}.pub，请先生成密钥。"; return 1; }
-    mkdir -p /root/.ssh || { ui_fail "无法创建 /root/.ssh"; return 1; }
-    chmod 700 /root/.ssh || return 1
+    mkdir -p "$(dirname "$AUTH_KEYS")" || { ui_fail "无法创建密钥目录"; return 1; }
+    chmod 700 "$(dirname "$AUTH_KEYS")" || return 1
     pub=$(cat "${KEY_PATH}.pub") || return 1
     touch "$AUTH_KEYS" || { ui_fail "无法创建 $AUTH_KEYS"; return 1; }
     if ! grep -qxF "$pub" "$AUTH_KEYS"; then
@@ -383,7 +469,8 @@ install_pubkey() {
         "PubkeyAuthentication yes" \
         "PermitEmptyPasswords no" \
         "PermitUserEnvironment no" || return 1
-    ui_ok "公钥部署完成，SSH 低风险策略已写入托管块。"
+    activate_ssh_policy "$backup_dir" || return 1
+    ui_ok "公钥部署完成，SSH 低风险策略已生效。"
 }
 
 show_private_key() {
@@ -405,7 +492,18 @@ configure_ssh_port() {
     read -r port
     [ -z "$port" ] && { ui_warn "已取消。"; return 0; }
     [[ "$port" =~ ^[0-9]+$ ]] || { ui_fail "端口必须是数字。"; return 1; }
+    [ "${#port}" -le 5 ] || { ui_fail "端口范围必须是 1-65535。"; return 1; }
+    port=$((10#$port))
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { ui_fail "端口范围必须是 1-65535。"; return 1; }
+    # socket activation 的监听端口由 systemd 管理，单改 sshd_config 不够。
+    if cmd_exists systemctl && { systemctl is-active --quiet ssh.socket || systemctl is-active --quiet sshd.socket; }; then
+        ui_fail "检测到 SSH socket activation，请先通过控制台调整 socket 监听配置；本次未修改。"
+        return 1
+    fi
+    if [ "$(get_sshd_listen_ports | sort -un)" = "$port" ]; then
+        ui_info "SSH 已配置为端口 $port，无需修改。"
+        return 0
+    fi
     if cmd_exists ss || cmd_exists netstat; then
         if port_is_in_use "$port"; then
             ui_fail "端口 $port 已被占用。"
@@ -421,8 +519,8 @@ configure_ssh_port() {
         "PubkeyAuthentication yes" \
         "PermitEmptyPasswords no" \
         "PermitUserEnvironment no" || return 1
-    ui_ok "SSH 端口已写入为 $port。请 reload 后新开窗口测试。"
-    reload_ssh_safe
+    activate_ssh_policy "$backup_dir" || return 1
+    ui_ok "SSH 端口已设置为 $port。请新开窗口测试。"
 }
 
 configure_password_login() {
@@ -445,14 +543,14 @@ configure_password_login() {
                 "KbdInteractiveAuthentication no" \
                 "ChallengeResponseAuthentication no" \
                 "PermitEmptyPasswords no" || return 1
+            activate_ssh_policy "$backup_dir" || return 1
             ui_ok "密码登录已禁用。"
-            reload_ssh_safe
             ;;
         2)
             backup_dir=$(create_ssh_backup "enable-password-login") || return 1
             append_managed_block "$backup_dir" "PasswordAuthentication yes" || return 1
-            ui_ok "密码登录已显式开启。"
-            reload_ssh_safe
+            activate_ssh_policy "$backup_dir" || return 1
+            ui_ok "PasswordAuthentication 已开启；Root/Match 等限制仍独立生效。"
             ;;
         *) ui_warn "已取消。" ;;
     esac
@@ -476,8 +574,8 @@ configure_root_login() {
     esac
     backup_dir=$(create_ssh_backup "root-login-policy") || return 1
     append_managed_block "$backup_dir" "PermitRootLogin $value" || return 1
+    activate_ssh_policy "$backup_dir" || return 1
     ui_ok "Root 登录策略已设置为: $value"
-    reload_ssh_safe
 }
 
 apply_recommended_policy() {
@@ -493,8 +591,8 @@ apply_recommended_policy() {
         "PermitUserEnvironment no" \
         "ClientAliveInterval 600" \
         "ClientAliveCountMax 2" || return 1
+    activate_ssh_policy "$backup_dir" || return 1
     ui_ok "推荐 SSH 基础策略已应用。"
-    reload_ssh_safe
 }
 
 rollback_latest_backup() {
@@ -549,8 +647,10 @@ main_menu() {
     done
 }
 
-clear
-need_root
-need_sshd_config
-sshd_test || ui_warn "当前 sshd_config 校验失败，请先修复配置或使用备份回滚。"
-main_menu
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    clear
+    need_root
+    need_sshd_config
+    sshd_test || ui_warn "当前 sshd_config 校验失败，请先修复配置或使用备份回滚。"
+    main_menu
+fi
