@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # <SEC_SCRIPT_MARKER_v2.3>
-# SEC_TOOLBOX_VERSION=4.1.0
+# SEC_TOOLBOX_VERSION=4.2.0
 # install.sh - Linux 安全工具箱主控台 (v4.0 增强版)
 # 特性：版本自检 | 本地模式 | BBR 多版本 | v4 出口加速中心 | 统一 emoji
 
@@ -27,7 +27,7 @@ export SEC_LOCAL_MODE
 GITHUB_BASE="https://gh-proxy.org/raw.githubusercontent.com/aichenshidelibing/Security-scan-script/main"
 GITHUB_RAW_BASE="https://github.com/aichenshidelibing/Security-scan-script/raw/refs/heads/main"
 TAG_MARKER="<SEC_SCRIPT_MARKER_v2.3>"
-SEC_TOOLBOX_VERSION="${SEC_TOOLBOX_VERSION:-4.1.0}"
+SEC_TOOLBOX_VERSION="${SEC_TOOLBOX_VERSION:-4.2.0}"
 SEC_TOOLBOX_VERSION_URL="${SEC_TOOLBOX_VERSION_URL:-$GITHUB_BASE/install.sh}"
 SEC_UPDATE_CHECK="${SEC_UPDATE_CHECK:-1}"
 
@@ -85,7 +85,7 @@ show_dashboard() {
 download_script() {
     local name="$1"
     case "$name" in
-        v[1-4].sh|lib/platform.sh|lib/apt.sh|lib/bbr.sh|lib/apt-rewrite.awk|platforms/debian.sh|platforms/ubuntu.sh|platforms/rhel.sh) ;;
+        v[1-5].sh|lib/docker.sh|lib/swap.sh|lib/platform.sh|lib/apt.sh|lib/bbr.sh|lib/apt-rewrite.awk|platforms/debian.sh|platforms/ubuntu.sh|platforms/rhel.sh) ;;
         *) ui_fail "无效组件路径: $name"; return 1 ;;
     esac
     local url="${GITHUB_BASE}/${name}" mirror
@@ -145,6 +145,11 @@ ensure_platform() {
 }
 download_module() {
     local name="$1" part
+    if [ "$name" = v5.sh ]; then
+        for part in lib/platform.sh lib/docker.sh lib/swap.sh; do
+            download_script "$part" || return 1
+        done
+    fi
     if [ "$name" = v1.sh ]; then
         download_script lib/platform.sh || return 1
         source ./lib/platform.sh
@@ -185,7 +190,7 @@ check_update() {
 
 # --- 本地自检：语法与基础完整性 ---
 self_check() {
-    local scripts="install.sh v1.sh v2.sh v3.sh v4.sh lib/platform.sh lib/apt.sh lib/bbr.sh platforms/${SEC_PLATFORM:-unknown}.sh"
+    local scripts="install.sh v1.sh v2.sh v3.sh v4.sh v5.sh lib/docker.sh lib/swap.sh lib/platform.sh lib/apt.sh lib/bbr.sh platforms/${SEC_PLATFORM:-unknown}.sh"
     local failed=0 err
     err=$(mktemp) || return 1
 
@@ -230,6 +235,7 @@ menu_download() {
         echo " [3] 下载 v3.sh (网络隐身/禁Ping)"
         ui_line
         echo " [4] 拉取 v4.sh (WARP + GitHub加速源自动配置 - 按需)"
+        echo " [5] 下载 v5.sh (Docker / Swap 管理 - 按需)"
         echo " [a] 一键更新所有脚本 (All)"
         echo " [q] 返回主菜单"
         ui_line
@@ -239,8 +245,9 @@ menu_download() {
         case "$dl_choice" in
             [1-3]) download_module "v${dl_choice}.sh"; sleep 1 ;;
             4) download_script "v4.sh"; sleep 1 ;;
+            5) download_module "v5.sh"; sleep 1 ;;
             a|A) local failed=0
-                for s in v1.sh v2.sh v3.sh v4.sh; do download_module "$s" || failed=1; done
+                for s in v1.sh v2.sh v3.sh v4.sh v5.sh; do download_module "$s" || failed=1; done
                 if [ "$failed" -eq 0 ]; then ui_ok "同步完成。"; else ui_fail "部分脚本下载失败，已保留原文件。"; fi
                 sleep 1; return ;;
             q|Q) return ;;
@@ -295,6 +302,8 @@ main_menu() {
         echo -e "     ${GREY}└─ 开启或关闭禁 Ping / 隐藏服务器存活状态${RESET}"
         [ -f "v4.sh" ] && { printf " [4] %-30s [状态: %s]\n" "出口与加速源 (v4.sh)" "$(st v4.sh)"; echo -e "     ${GREY}└─ WARP 安装 / GitHub 镜像源自动配置${RESET}"; }
         ui_line
+        printf " [5] %-30s [状态: %s]\n" "Docker / Swap (v5.sh)" "$(st v5.sh)"
+        echo -e "     ${GREY}└─ Docker 安装源自动兜底 / 可信镜像配置 / Swap 容量建议${RESET}"
         echo " [7] 本地自检 (检查脚本语法)"
         echo " [8] 智能清理 (清理所有工具脚本)"
         echo " [9] 下载中心 (单独下载或批量更新)"
@@ -304,7 +313,7 @@ main_menu() {
         read -r CHOICE
 
         case "$CHOICE" in
-            [1-4])
+            [1-5])
                 local S="v${CHOICE}.sh"
                 if [ -f "$S" ]; then bash ./"$S"
                 else ui_fail "$S 缺失，请先选 9 进入下载中心。"; sleep 2; fi ;;

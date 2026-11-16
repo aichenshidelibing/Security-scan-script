@@ -12,6 +12,7 @@
 | `v1.sh` | 基础安全加固 | APT 源自动优化、基础工具兼容安装、BBR、SSH 低风险项、权限、内核、日志、Fail2ban | 中，交互确认 |
 | `v2.sh` | SSH 策略中心 | 生成/部署 ED25519 密钥、修改 SSH 端口、密码登录策略、Root 登录策略、备份回滚 | 高，强确认 |
 | `v3.sh` | 禁 Ping 管理 | 通过 sysctl / 防火墙管理 ICMP Echo | 中 |
+| `v5.sh` | Docker / Swap | Docker 安装源兜底、可信镜像配置、Swap 规划与创建 | 高，逐项确认 |
 
 ## 快速开始
 
@@ -47,6 +48,7 @@ chmod +x install.sh
 - `[1]` 基础管家：APT 源优化、基础软件、低风险系统加固。
 - `[2]` SSH 策略中心：密钥部署、改端口、密码登录、Root 登录和回滚。
 - `[3]` 网络隐身：管理禁 Ping 策略。
+- `[5]` Docker / Swap：按需安装 Docker、配置可信镜像和创建交换文件。
 - `[7]` 本地自检：检查脚本 Bash 语法。
 - `[8]` 智能清理：清理本工具箱子脚本。
 - `[9]` 下载中心：下载或更新子脚本。
@@ -56,11 +58,12 @@ chmod +x install.sh
 修改脚本后建议先运行：
 
 ```bash
-for script in install.sh v1.sh v2.sh v3.sh v4.sh lib/*.sh platforms/*.sh tests/*.sh; do
+for script in install.sh v1.sh v2.sh v3.sh v4.sh v5.sh lib/*.sh platforms/*.sh tests/*.sh; do
     bash -n "$script" || exit 1
 done
 awk -f lib/apt-rewrite.awk /dev/null
 bash tests/platform-apt-bbr.sh
+bash tests/docker-swap.sh
 bash tests/regression.sh
 ```
 
@@ -169,6 +172,62 @@ v2.sh / v3.sh / v4.sh       公共模块，不复制为多套
 - [Google BBR](https://github.com/google/bbr)、[BBRv3 注册源码](https://github.com/google/bbr/blob/v3/net/ipv4/tcp_bbr.c)
 - [Teddysun BBR](https://github.com/teddysun/across/blob/master/bbr.sh)
 - [Linux-NetSpeed](https://github.com/ylx2016/Linux-NetSpeed)
+
+## Docker / Swap（V5）
+
+主菜单 `[9] → [5]` 下载模块和依赖，再从主菜单 `[5]` 打开。
+完整仓库也可运行 `sudo bash v5.sh`，需保留 `lib/platform.sh`、`lib/docker.sh`、`lib/swap.sh`。
+
+### Docker 安装
+
+- 安装稳定版 Engine、CLI、containerd、Buildx、Compose 插件；采用包管理器，不执行远程安装脚本。
+- 官方 `download.docker.com` 优先；密钥/元数据访问或校验失败时依次尝试阿里、清华 Docker CE 仓库。
+  APT 还先下载软件包，包下载失败可在实际安装前尝试下一家。
+- APT 校验 Docker 主密钥指纹、InRelease 签名及版本/架构；RPM 校验主密钥指纹并强制 `gpgcheck=1`。
+  签名密钥轮换时会拒绝安装，需要维护者核对更新，不能跳过验证。
+- 支持路径为 Debian 12/13、Ubuntu 22.04/24.04/26.04，以及适配白名单内的 RPM 系；
+  Rocky/Alma 使用兼容 CentOS 的仓库，实际是否有对应包以仓库为准，不代表 Docker 官方认证支持。
+- 要求 systemd 正常运行；拒绝容器内安装、已有 Docker、冲突运行时或已有 Docker 仓库。
+  不自动卸载软件、不自动升级现有 Docker、不添加普通用户到 docker 组。
+- 安装后启用服务并检查 `docker info` / `docker compose version`。不自动拉取或运行测试镜像。
+- Docker 安装/发布容器端口可能改变防火墙行为，尤其注意 UFW；请检查安全组及 Docker 防火墙策略。
+- 包安装失败可能留下已安装的依赖；保留已验证仓库与日志，不声称能完整回滚包管理器事务。
+  记录在 `/var/backups/sec-toolbox/docker/`。若系统基础源本身失效，请先用 V1 修复。
+
+### Docker Hub 镜像加速
+
+**软件安装源与容器镜像加速源不同。** 安装源可自动兜底；不内置不明公共 Docker Hub 代理。
+菜单 `[2]` 探测官方 API（401 认证挑战视为网络可达），支持填写自己信任/自建或云账户提供的
+专属 HTTPS 地址。探测 `/v2/` 后仅合并 `registry-mirrors`，保留其他 JSON 配置并校验、备份。
+API 可达不代表所有镜像层均可下载，也不保证镜像代理行为可信。
+
+保存需输入 `SAVE MIRROR`；已有 Docker 服务运行时，只有另行输入 `RESTART DOCKER` 才重启，
+否则保存待下次启动生效。重启失败恢复原配置并尝试重启旧配置。不会写入 `insecure-registries`。
+
+### Swap 建议
+
+| 物理内存 | 建议总 Swap（通用起点） |
+|---|---|
+| ≤ 2 GiB | 约内存的 2 倍，最少 1 GiB |
+| 2–8 GiB | 约与内存相同 |
+| > 8 GiB | 8 GiB |
+
+扣除已启用 Swap（含分区、文件、zram），再结合磁盘计算建议新增量。
+保留空间取 **2 GiB 与分区总容量 10% 中较大者**，建议容量向下取整到 256 MiB；
+支持输入自定义容量，范围 256 MiB 到可用安全上限，单文件最多 32 GiB。0 取消。
+这不是数据库/休眠等特殊负载的容量保证，也不能解决持续内存不足。
+
+- 仅自动支持 ext4/XFS，Btrfs/ZFS/NFS/overlay 与容器环境拒绝自动创建。
+- 创建 `/var/lib/sec-toolbox/swapfile`，权限 600，实际写入磁盘块，执行 `mkswap` / `swapon` 并核对活动状态。
+- 成功后追加 `/etc/fstab`，原文件备份到 `/var/backups/sec-toolbox/swap/`；不修改 swappiness 或休眠设置。
+- 不覆盖、调整或关闭已有交换文件；磁盘分配/激活失败清理本次文件。
+  后续失败需回滚时先关闭新 Swap，若因内存不足关闭失败则保留活动文件并报告，不删除正在使用的文件。
+- `--local` 不联网安装 Docker 或探测镜像；Swap 本地功能仍需手动确认。
+
+参考：[Docker Debian 安装](https://docs.docker.com/engine/install/debian/)、
+[Docker Ubuntu 安装](https://docs.docker.com/engine/install/ubuntu/)、
+[Docker CentOS 安装](https://docs.docker.com/engine/install/centos/)。
+测试以临时文件与模拟命令为主；未在所有发行版实际安装 Docker/启用 Swap。
 
 ## 风险提示
 
